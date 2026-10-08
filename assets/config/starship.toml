@@ -1,0 +1,33 @@
+scan_timeout = 100
+
+[username]
+format = "[$user]($style)"
+show_always = true
+
+[hostname]
+ssh_only = false
+format = "@[$hostname]($style) in "
+
+[directory]
+truncation_length = 6
+truncation_symbol = "…/"
+
+[git_branch]
+symbol = "🌱 "
+
+[status]
+style = "bg:red"
+symbol = "💣"
+format = '[\[$symbol $int $common_meaning$signal_name\]]($style) '
+map_symbol = true
+disabled = false
+
+[shell]
+bash_indicator = "bash"
+fish_indicator = "fish"
+zsh_indicator = "zsh"
+powershell_indicator = "pwsh"
+disabled = false
+
+[nodejs]
+symbol = "n⬡de "

@@ -1,0 +1,31 @@
+#cloud-config
+hostname: __HOSTNAME_YAML__
+# Fedora's early cloud-init stage has no system bus. Set the name in bootstrap.
+preserve_hostname: true
+manage_etc_hosts: true
+growpart:
+  mode: auto
+  devices: ['/']
+  ignore_growroot_disabled: false
+resize_rootfs: true
+users:
+  - name: pi
+    gecos: Pi VM user
+    groups: [wheel]
+    shell: /bin/bash
+    lock_passwd: true
+    sudo: ["ALL=(ALL) NOPASSWD:ALL"]
+    ssh_authorized_keys:
+__AUTHORIZED_KEYS__
+ssh_pwauth: false
+disable_root: true
+package_update: true
+packages:
+  - cloud-utils-growpart
+  - hyperv-daemons
+  - python3
+  - sudo
+write_files:
+__WRITE_FILES__
+runcmd:
+  - [bash, -lc, "VM_HOSTNAME=__HOSTNAME_SHELL__ /usr/local/sbin/pi-vm-bootstrap"]

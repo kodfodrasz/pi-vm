@@ -1,0 +1,176 @@
+" Practical, plugin-free Vim config for terminal/SSH use.
+" Vim 9 is the target, but most settings also work in older Vim versions.
+
+set nocompatible
+filetype plugin indent on
+syntax enable
+
+" --- Appearance: dark, readable, and safe in 256-color terminals ---
+set background=dark
+if exists('+termguicolors') && $COLORTERM =~? 'truecolor\|24bit'
+  " Use true color only when the terminal explicitly advertises it.
+  set termguicolors
+endif
+if filereadable($VIMRUNTIME . '/colors/habamax.vim')
+  colorscheme habamax
+else
+  " Fallback available in older Vim installations.
+  colorscheme desert
+endif
+set number
+set cursorline
+set showmode
+set laststatus=2
+set wildmenu
+set wildmode=longest:full,full
+
+" --- Sensible editing defaults ---
+set encoding=utf-8
+set hidden                    " Switch buffers without being forced to save first.
+set confirm                   " Ask before abandoning unsaved work.
+set autoread                  " Notice files changed outside Vim.
+set backspace=indent,eol,start
+set mouse=a                   " Mouse works for movement, scrolling, and selection.
+set ignorecase smartcase      " Searches ignore case unless the query contains capitals.
+set incsearch hlsearch
+set ruler
+set scrolloff=3
+set sidescrolloff=5
+set nowrapscan                " Do not silently wrap searches from end to start.
+
+" Long lines wrap.  Up/Down follow the visible screen rows, not file rows.
+set wrap
+set linebreak
+if exists('+breakindent')
+  set breakindent
+endif
+nnoremap <Up> gk
+nnoremap <Down> gj
+xnoremap <Up> gk
+xnoremap <Down> gj
+inoremap <Up> <C-O>gk
+inoremap <Down> <C-O>gj
+" To restore file-line Up/Down movement, remove the six mappings above.
+
+" Home/End work on the visible wrapped row; they land at useful text edges.
+noremap <Home> g^
+noremap <End> g$
+xnoremap <Home> g^
+xnoremap <End> g$
+inoremap <Home> <C-O>g^
+inoremap <End> <C-O>g$
+
+" --- Indentation ---
+" New, otherwise-unidentified files use two spaces.  Existing files are
+" inspected on open: tabs are retained; space-indented files choose 2 or 4
+" spaces from their shallowest indentation.  Makefiles always use real tabs.
+set expandtab
+set tabstop=2
+set shiftwidth=2
+set softtabstop=2
+set autoindent
+set copyindent
+set preserveindent
+set shiftround
+
+function! s:DetectIndentation() abort
+  if &l:filetype ==# 'make'
+    setlocal noexpandtab tabstop=8 shiftwidth=8 softtabstop=0
+    return
+  endif
+
+  let l:smallest = 999
+  let l:last_line = min([line('$'), 400])
+  for l:line_number in range(1, l:last_line)
+    let l:line = getline(l:line_number)
+    if l:line =~# '^\t'
+      setlocal noexpandtab tabstop=8 shiftwidth=8 softtabstop=0
+      return
+    endif
+    let l:amount = indent(l:line_number)
+    if l:amount > 0 && l:amount < l:smallest
+      let l:smallest = l:amount
+    endif
+  endfor
+
+  if l:smallest != 999
+    " A one-space continuation indent should not turn shift commands into 1.
+    let l:width = l:smallest <= 2 ? 2 : 4
+    execute 'setlocal expandtab tabstop=' . l:width .
+          \ ' shiftwidth=' . l:width . ' softtabstop=' . l:width
+  endif
+endfunction
+
+augroup practical_indent
+  autocmd!
+  autocmd BufReadPost * call <SID>DetectIndentation()
+  autocmd FileType make setlocal noexpandtab tabstop=8 shiftwidth=8 softtabstop=0
+augroup END
+
+" To normalize an entire file to the current indentation settings, use:
+"   :set expandtab | :retab
+" Review the diff first: :retab changes leading tab/space characters.
+
+" --- Recovery and paste ---
+" Keep swap files for recovery, but keep them out of project directories.
+if !isdirectory(expand('~/.vim/swap'))
+  call mkdir(expand('~/.vim/swap'), 'p', 0700)
+endif
+set directory^=~/.vim/swap//
+set nobackup nowritebackup
+set noundofile                 " Undo history lasts for this Vim session only.
+
+" Modern Vim handles bracketed paste automatically.  F4 is a manual fallback
+" for old/broken terminal paths: press it before and after pasting if needed.
+set pastetoggle=<F4>
+if has('clipboard')
+  " Use the system clipboard when this remote Vim was built with clipboard
+  " support.  If it is unavailable, terminal paste still works normally.
+  set clipboard^=unnamedplus
+endif
+
+" --- Navigation and built-in file browser ---
+" Vim tabs can each hold one file.  In :Explore, press t to open an entry in a
+" new tab; opening an entry normally also uses a new tab with this setting.
+let g:netrw_banner = 0
+let g:netrw_liststyle = 3
+let g:netrw_browse_split = 3
+nnoremap <F6> :Explore<CR>
+noremap <F7> gT
+nnoremap <F8> gt
+
+" --- Lightweight completion and optional Python formatting ---
+" In Insert mode, Ctrl-N / Ctrl-P complete forward/backward from words Vim
+" knows in open buffers.  No language server or plugin is required.
+set completeopt=menuone,noselect
+
+function! s:FormatPythonWithRuff() abort
+  if !executable('ruff') || !&l:modifiable || empty(expand('%:p'))
+    return
+  endif
+  let l:view = winsaveview()
+  let l:before = getline(1, '$')
+  let l:formatted = systemlist(
+        \ 'ruff format --stdin-filename ' . shellescape(expand('%:p')) . ' -',
+        \ l:before)
+  if v:shell_error == 0 && l:formatted !=# l:before
+    if empty(l:formatted)
+      silent %delete _
+    else
+      call setline(1, l:formatted)
+      if line('$') > len(l:formatted)
+        execute (len(l:formatted) + 1) . ',$delete _'
+      endif
+    endif
+  elseif v:shell_error != 0
+    echohl WarningMsg | echom 'ruff format failed; saved without formatting' | echohl None
+  endif
+  call winrestview(l:view)
+endfunction
+
+augroup practical_formatting
+  autocmd!
+  " If ruff is installed on this host, Python is formatted just before saving.
+  " Install it later with: python3 -m pip install --user ruff
+  autocmd BufWritePre *.py call <SID>FormatPythonWithRuff()
+augroup END
