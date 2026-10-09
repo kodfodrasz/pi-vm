@@ -46,7 +46,8 @@ def set_tree_owner(root: Path, user: str, group: str, owner=shutil.chown) -> Non
             for entry in entries:
                 child = Path(entry.path)
                 if entry.is_symlink():
-                    raise RuntimeError(f"refusing symlink in ownership tree: {child}")
+                    # npm and the Pi launcher create executable links; never own their targets.
+                    continue
                 if entry.is_dir(follow_symlinks=False):
                     pending.append(child)
                 else:

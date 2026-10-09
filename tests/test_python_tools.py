@@ -119,21 +119,29 @@ class BootstrapTests(unittest.TestCase):
             self.assertEqual({path for path, _ in calls}, {root, root / "nested", root / "nested/file"})
             self.assertTrue(all(kwargs == {"user": "pi", "group": "pi"} for _, kwargs in calls))
 
-    def test_directory_tree_owner_rejects_root_and_external_target_symlinks(self):
+    def test_directory_tree_owner_skips_links_and_allows_retries(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory) / "tree"
             root.mkdir()
+            executable = root / "pi-executable"
+            executable.write_bytes(b"inside")
+            (root / "pi").symlink_to(executable)
             external = Path(directory) / "external"
             external.write_bytes(b"outside")
             (root / "link").symlink_to(external)
             calls = []
-            with self.assertRaises(RuntimeError):
-                bootstrap.set_tree_owner(root, "pi", "pi", owner=lambda path, **kwargs: calls.append(path))
+            owner = lambda path, **kwargs: calls.append(path)
+            bootstrap.set_tree_owner(root, "pi", "pi", owner=owner)
+            bootstrap.set_tree_owner(root, "pi", "pi", owner=owner)
+            self.assertEqual(calls.count(root), 2)
+            self.assertEqual(calls.count(executable), 2)
             self.assertNotIn(external, calls)
+            self.assertNotIn(root / "pi", calls)
+            self.assertNotIn(root / "link", calls)
             root_link = Path(directory) / "root-link"
             root_link.symlink_to(root, target_is_directory=True)
             with self.assertRaises(RuntimeError):
-                bootstrap.set_tree_owner(root_link, "pi", "pi", owner=lambda path, **kwargs: None)
+                bootstrap.set_tree_owner(root_link, "pi", "pi", owner=owner)
 
 
 class SeedPublicationTests(unittest.TestCase):
