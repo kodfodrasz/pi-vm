@@ -1,34 +1,33 @@
-SHELL := /usr/bin/env bash
-.PHONY: download seed kvm-start kvm-stop kvm-status test validate
+.PHONY: download seed kvm-start kvm-stop kvm-status hyperv-image test validate
 
 INSTANCE ?= pipette
 MEMORY ?= 2048
 CPUS ?= 2
 DISK ?= 16G
 SSH_PORT ?= 2222
-export INSTANCE MEMORY CPUS DISK SSH_PORT
+
+uv-run = uv run --script
 
 download:
-	./scripts/download.sh
+	$(uv-run) scripts/kvm.py download
 
 seed:
-	./scripts/seed.sh "$$INSTANCE"
+	$(uv-run) scripts/seed.py $(INSTANCE) --output build/$(INSTANCE)-seed.iso
 
 kvm-start:
-	./scripts/kvm.sh start "$$INSTANCE" --memory "$$MEMORY" --cpus "$$CPUS" --disk "$$DISK" --ssh-port "$$SSH_PORT"
+	$(uv-run) scripts/kvm.py start $(INSTANCE) --memory $(MEMORY) --cpus $(CPUS) --disk $(DISK) --ssh-port $(SSH_PORT)
 
 kvm-stop:
-	./scripts/kvm.sh stop "$$INSTANCE"
+	$(uv-run) scripts/kvm.py stop $(INSTANCE)
 
 kvm-status:
-	./scripts/kvm.sh status "$$INSTANCE"
+	$(uv-run) scripts/kvm.py status $(INSTANCE)
+
+hyperv-image:
+	$(uv-run) scripts/hyperv.py image
 
 validate:
-	@test -n "$$INSTANCE" || { echo 'Set INSTANCE' >&2; exit 2; }
-	python3 scripts/validate.py --instance "$$INSTANCE" --ssh-port "$$SSH_PORT"
+	$(uv-run) scripts/validate.py --instance $(INSTANCE) --ssh-port $(SSH_PORT)
 
 test:
-	mkdir -p build/test-tmp
-	TMPDIR="$(CURDIR)/build/test-tmp" PYTHONOPTIMIZE= bash tests/host.sh
-	TMPDIR="$(CURDIR)/build/test-tmp" PYTHONOPTIMIZE= python3 -m unittest discover -s tests -p validate.py
-	TMPDIR="$(CURDIR)/build/test-tmp" PYTHONOPTIMIZE= python3 -m unittest discover -s tests -p kvm.py
+	$(uv-run) tests/test_python_tools.py

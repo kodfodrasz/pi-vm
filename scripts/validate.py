@@ -1,4 +1,7 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# ///
 """Check an existing KVM guest. Nested and balloon tests are explicit opt-ins."""
 import argparse
 import json
@@ -306,7 +309,7 @@ def balloon_test(qmp):
 def validate(args):
     instance = args.build / args.instance
     env = dict(os.environ, PI_VM_BUILD=str(args.build))
-    state = subprocess.run([str(ROOT/'scripts/kvm.sh'), 'status', args.instance],
+    state = subprocess.run([sys.executable, str(ROOT/'scripts/kvm.py'), 'status', args.instance],
                            env=env, text=True, capture_output=True, timeout=10)
     if state.returncode:
         raise Failure('instance is not running: ' + state.stdout.strip())

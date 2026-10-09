@@ -28,4 +28,4 @@ packages:
 write_files:
 __WRITE_FILES__
 runcmd:
-  - [bash, -lc, "VM_HOSTNAME=__HOSTNAME_SHELL__ /usr/local/sbin/pi-vm-bootstrap"]
+  - [python3, -c, "import os, runpy; os.environ['VM_HOSTNAME'] = '__HOSTNAME_SHELL__'; runpy.run_path('/opt/pi-vm/bootstrap.py', run_name='__main__')"]
