@@ -3,6 +3,7 @@
 import base64
 import json
 from pathlib import Path
+import shutil
 import subprocess
 import tempfile
 
@@ -29,4 +30,20 @@ with tempfile.TemporaryDirectory() as tmp:
                                  '--instance-id', bad, '--output-dir', tmp],
                                 capture_output=True)
         assert result.returncode != 0
-print('Seed keys, embedded bootstrap, root growth and input checks passed')
+    # Simulate a Windows editor/checkout with UTF-8 BOMs and CRLF everywhere.
+    windows = Path(tmp)/'windows'
+    (windows/'scripts').mkdir(parents=True)
+    shutil.copyfile(root/'scripts/render-seed.py', windows/'scripts/render-seed.py')
+    for asset in (root/'assets').rglob('*'):
+        if asset.is_file():
+            target = windows/asset.relative_to(root)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            text = asset.read_text(encoding='utf-8-sig').replace('\n', '\r\n')
+            target.write_bytes(b'\xef\xbb\xbf' + text.encode('utf-8'))
+    subprocess.run(['python3', str(windows/'scripts/render-seed.py'), '--instance-id',
+                    'render-test', '--output-dir', str(windows/'seed')], check=True)
+    for name in ['user-data', 'meta-data']:
+        actual = (windows/'seed'/name).read_bytes()
+        assert actual == (Path(tmp)/name).read_bytes(), 'Windows source normalization differs'
+        assert b'\r' not in actual and not actual.startswith(b'\xef\xbb\xbf')
+print('Seed keys, bootstrap, root growth, inputs and Windows CRLF/BOM checks passed')

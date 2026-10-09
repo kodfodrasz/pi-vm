@@ -36,7 +36,10 @@ def main():
     for dest, (source, permissions, owner) in EMBED.items():
         if not source.is_file():
             parser.error(f"missing asset: {source}")
-        payload = base64.b64encode(source.read_bytes()).decode("ascii")
+        # All embedded assets are UTF-8 text. Normalize Windows CRLF and BOMs
+        # before encoding: Linux shebangs must not end with a carriage return.
+        content = source.read_text(encoding="utf-8-sig").encode("utf-8")
+        payload = base64.b64encode(content).decode("ascii")
         write_files.extend([
             f"  - path: {json.dumps(dest)}",
             f"    owner: {owner}",
@@ -44,21 +47,21 @@ def main():
             "    encoding: b64",
             f"    content: {payload}",
         ])
-    user_data = (ASSETS / "cloud-init/user-data.in").read_text()
+    user_data = (ASSETS / "cloud-init/user-data.in").read_text(encoding="utf-8-sig")
     user_data = user_data.replace("__HOSTNAME_YAML__", json.dumps(args.hostname))
     user_data = user_data.replace("__HOSTNAME_SHELL__", args.hostname)
     user_data = user_data.replace("__WRITE_FILES__", "\n".join(write_files))
-    keys = [line for line in (ASSETS / "authorized_keys").read_text().splitlines()
+    keys = [line for line in (ASSETS / "authorized_keys").read_text(encoding="utf-8-sig").splitlines()
             if line.strip() and not line.lstrip().startswith("#")]
     if not keys:
         parser.error("authorized_keys must contain at least one public key")
     user_data = user_data.replace("__AUTHORIZED_KEYS__", "\n".join(
         "      - " + json.dumps(key) for key in keys))
-    meta_data = (ASSETS / "cloud-init/meta-data.in").read_text()
+    meta_data = (ASSETS / "cloud-init/meta-data.in").read_text(encoding="utf-8-sig")
     meta_data = meta_data.replace("__INSTANCE_ID_YAML__", json.dumps(instance_id))
     meta_data = meta_data.replace("__HOSTNAME_YAML__", json.dumps(args.hostname))
-    (args.output_dir / "user-data").write_text(user_data)
-    (args.output_dir / "meta-data").write_text(meta_data)
+    (args.output_dir / "user-data").write_bytes(user_data.encode("utf-8"))
+    (args.output_dir / "meta-data").write_bytes(meta_data.encode("utf-8"))
 
 
 if __name__ == "__main__":

@@ -120,8 +120,12 @@ make seed INSTANCE=another-pi
 ## Windows 11 / Hyper-V
 
 Run PowerShell as Administrator. You need the Hyper-V feature and module,
-Python available as `python`, and 7-Zip available as `7z.exe`. Keep at least
-20 GiB free on the build/cache disk for raw and fixed-VHD conversion files.
+Python available as `python`, and 7-Zip available as `7z.exe`. The scripts use
+APIs available in Windows PowerShell 5.1; PowerShell 7 can also run them.
+They check the storage volume that holds each path, including mounted volumes.
+Keep at least 8 GiB free for the cache and 12 GiB for the build files. If both
+paths share a volume, at least 20 GiB must be free there. This is a conservative
+check for new VM creation; restarting an existing VM needs no conversion space.
 Use local disk storage, not a temporary or cloud-sync folder.
 
 ```powershell
@@ -152,22 +156,71 @@ Disk sizes must be at least 5 GiB and aligned to 1 MiB. Use values such as
 `8GiB` or `16GiB`. `-DynamicMemory` is an opt-in option; static RAM is safer
 for nested virtualization.
 
-Starting an existing stopped VM preserves its disk and settings. To rebuild,
-remove the old VM explicitly, then use `-Force` to replace its instance files.
+Starting an existing stopped VM preserves its disk and settings. A
+`creation-complete` file confirms that the script finished its VM configuration.
+A registered VM without that file is rejected so you can inspect it safely.
+To rebuild, remove the old VM explicitly, then use `-Force` to replace its
+instance files. `-Force` never replaces a registered VM.
+
+Failed first creation removes only its own temporary files and new VM. If VM
+removal or its state check fails, the disk is kept and the script prints its
+path. Inspect that VM before any manual cleanup. Raw extraction is staged and
+checked before it replaces a cache file. Shared bases are never resized after
+children have been made.
 Generated seed ISOs are reused: remove `build/seeds/ID.iso` explicitly if you
-want new bootstrap settings for a **new disk**. Changing an ISO does not rerun
+want new bootstrap settings for a **new disk**. `.gitattributes` keeps source
+line endings at LF, and the renderer normalizes UTF-8 BOMs and CRLF before
+embedding Linux files. Changing an ISO does not rerun
 cloud-init on an old disk. Open the console with `vmconnect.exe localhost pi-vm-pipette`.
 
 **Windows IMAPI2FS and actual Hyper-V deployment still need manual testing.**
 PowerShell syntax, the C# stream helper, and VHD disk format/content were checked
-on Linux. Those checks are not a Windows deployment test.
+on Linux. Those checks are not a Windows deployment test. Follow
+`docs/hyperv-manual-test.md` for the remaining host and guest checks.
 
 ## Checks and repeatability
 
 `make test` checks shell syntax, seed keys and embedded files, fish syntax when
 available, PowerShell parsing and C# compilation when available, and VHD footer
-fields/content with `pwsh` and `qemu-img`. It downloads nothing and boots no VM.
+fields/content with `pwsh` and `qemu-img`. With `pwsh`, it also runs 25 isolated
+Hyper-V orchestration cases using command doubles. They check ordering, cache
+replacement, restart, failed creation, and disk preservation. They use no real
+Hyper-V commands or network. The whole test suite downloads nothing and boots
+no VM.
 The 5 GiB VHD test runs only when enough disk space is available.
+
+### Check a running KVM guest
+
+`make validate` checks an existing VM; it never starts or rebuilds one. It waits
+up to five minutes for the real bootstrap marker, then checks cloud-init,
+identity, exact Pi/Starship versions, root growth, key-only SSH settings,
+rootless Podman, SELinux, and fish/Vim/tmux config loading. It also checks the
+cloud-init instance ID, so using another VM's SSH port fails. It uses a temporary
+tmux server and removes it afterward. Known early hostname warnings are
+reported only when they match the exact known message; other cloud-init errors
+and warnings fail the check. SSH policy is checked for the actual `pi`
+connection, including user/address `Match` rules. A guest with `UseDNS` enabled
+is rejected for manual `Match Host` verification.
+
+```sh
+make validate INSTANCE=pipette
+make validate INSTANCE=pipette VALIDATE_FLAGS='--nested --balloon --report build/pipette/validation.json'
+```
+
+The default check does not change memory or install software. `--nested` runs
+the L2 instruction test using the stock kernel module. `--balloon` briefly
+reduces memory by 256 MiB, then restores and checks the original target, even
+if the test fails. Do not kill the validator during that test. A restoration
+failure prints the original byte count for manual recovery.
+
+SSH uses a per-instance known-hosts file at `build/ID/known_hosts`. It accepts a
+first key but rejects changed keys. Authentication uses your normal OpenSSH
+agent or identity files; the validator does not inspect or copy key material.
+Use `VALIDATE_FLAGS='--known-hosts /absolute/path'`
+for an existing trusted file. JSON reports must stay inside that instance's
+build directory. A failed check exits nonzero; optional flags never silently
+skip their tests. Use `SSH_PORT=2223` for a VM on another port. The expected
+hostname is `pipette`, not the instance ID; `--hostname` changes that check.
 
 `tests/nested-kvm.py` runs a tiny L2 guest inside a test VM. It needs root and
 the stock KVM kernel module, not a QEMU package. See `docs/validation.md` for
