@@ -61,11 +61,11 @@ class GuestMakeTests(unittest.TestCase):
             fake.write_text(
                 "#!/usr/bin/bash\n"
                 "name=${0##*/}\n"
-                "printf '%s\\n' \"$name\" >> \"$PI_FAKE_LOG\"\n"
+                "printf 'start:%s:%s:%s\\n' \"$PI_FAKE_PASS\" \"$name\" \"$*\" >> \"$PI_FAKE_LOG\"\n"
                 "case $name in\n"
                 "  rpm|pdbedit|id) exit 1 ;;\n"
-                "  dnf) [[ -z ${PI_FAKE_DELAY_DNF:-} ]] || sleep 0.05; if [[ -n ${PI_FAKE_FAIL_DNF:-} && -e $PI_FAKE_FAIL_DNF ]]; then rm -f -- $PI_FAKE_FAIL_DNF; exit 1; fi ;;\n"
-                "  curl) while [[ $# -gt 0 ]]; do [[ $1 == -o ]] && { shift; printf archive > \"$1\"; }; shift; done ;;\n"
+                "  dnf) [[ -z ${PI_FAKE_DELAY_DNF:-} ]] || sleep 0.05; if [[ -n ${PI_FAKE_FAIL_DNF:-} && -e $PI_FAKE_FAIL_DNF ]]; then rm -f -- $PI_FAKE_FAIL_DNF; exit 1; fi; printf 'done:%s:dnf:%s\\n' \"$PI_FAKE_PASS\" \"$*\" >> \"$PI_FAKE_LOG\" ;;\n"
+                "  curl) while [[ $# -gt 0 ]]; do [[ $1 == -o ]] && { shift; printf archive > \"$1\"; }; shift; done; printf 'done:%s:curl:%s\\n' \"$PI_FAKE_PASS\" \"$*\" >> \"$PI_FAKE_LOG\" ;;\n"
                 "  tar) printf starship ;;\n"
                 "  sha256sum) ;;\n"
                 "  openssl) printf 0123456789abcdef\\n ;;\n"
@@ -88,7 +88,7 @@ class GuestMakeTests(unittest.TestCase):
             fake_install.write_text(
                 "#!/usr/bin/bash\nargs=()\nwhile [[ $# -gt 0 ]]; do\n"
                 "  if [[ $1 == -o || $1 == -g ]]; then shift 2; else args+=(\"$1\"); shift; fi\n"
-                "done\nprintf 'install-args:%s\\n' \"${args[*]}\" >> \"$PI_FAKE_LOG\"\nexec /usr/bin/install \"${args[@]}\"\n"
+                "done\nprintf 'start:%s:install:%s\\n' \"$PI_FAKE_PASS\" \"${args[*]}\" >> \"$PI_FAKE_LOG\"\nprintf 'done:%s:install:%s\\n' \"$PI_FAKE_PASS\" \"${args[*]}\" >> \"$PI_FAKE_LOG\"\nexec /usr/bin/install \"${args[@]}\"\n"
             )
             fake_install.chmod(0o755)
             shell_file = root / "etc" / "shells"
@@ -97,6 +97,7 @@ class GuestMakeTests(unittest.TestCase):
             variables = {
                 "PATH": f"{fake_bin}:{os.environ['PATH']}",
                 "PI_FAKE_LOG": str(fake_log),
+                "PI_FAKE_PASS": "failed",
                 "PI_FAKE_DELAY_DNF": "1",
                 "PI_FAKE_FAIL_DNF": str(root / "fail-dnf"),
                 "STAGE": str(stage),
@@ -126,25 +127,84 @@ class GuestMakeTests(unittest.TestCase):
             self.assertNotEqual(failed.returncode, 0)
             retry = root / "usr" / "local" / "sbin" / "pi-vm-bootstrap"
             self.assertTrue(retry.is_file(), "retry wrapper must precede package failure")
-            for _ in range(2):
+            failed_entries = fake_log.read_text().splitlines()
+            self.assertFalse(any(":curl:" in line or "authorized_keys" in line for line in failed_entries))
+            for pass_name in ("retry-1", "retry-2"):
+                environment["PI_FAKE_PASS"] = pass_name
                 result = subprocess.run(["make", "-j4", "--no-print-directory", "-f", str(MAKEFILE), "bootstrap"],
                                         env=environment, text=True, capture_output=True)
                 self.assertEqual(result.returncode, 0, result.stderr + result.stdout + fake_log.read_text())
+                entries = [line for line in fake_log.read_text().splitlines() if f":{pass_name}:" in line]
+                dnf_done = next(i for i, line in enumerate(entries) if line.startswith(f"done:{pass_name}:dnf:"))
+                curl_starts = [i for i, line in enumerate(entries) if line.startswith(f"start:{pass_name}:curl:")]
+                config_installs = [i for i, line in enumerate(entries) if "authorized_keys" in line]
+                self.assertTrue(all(dnf_done < i for i in curl_starts))
+                self.assertTrue(all(dnf_done < i for i in config_installs))
+                pi_chown = [i for i, line in enumerate(entries)
+                             if line.startswith(f"start:{pass_name}:chown:") and "pi:pi" in line]
+                pi_runuser = [i for i, line in enumerate(entries)
+                               if line.startswith(f"start:{pass_name}:runuser:") and "npm" in line]
+                self.assertTrue(pi_chown)
+                self.assertTrue(pi_runuser)
+                self.assertLess(min(pi_chown), min(pi_runuser))
             commands = fake_log.read_text().splitlines()
-            self.assertLess(commands.index("hostnamectl"), commands.index("dnf"))
-            self.assertLess(commands.index("dnf"), commands.index("rpm"))
-            self.assertLess(commands.index("dnf"), commands.index("curl"))
-            config_install = next(i for i, line in enumerate(commands) if "authorized_keys" in line)
-            self.assertLess(commands.index("dnf"), config_install)
-            self.assertLess(commands.index("chown"), commands.index("runuser"))
-            self.assertGreaterEqual(commands.count("dnf"), 3)
-            self.assertGreaterEqual(commands.count("systemctl"), 2)
+            self.assertGreaterEqual(sum(line.startswith("done:") and ":dnf:" in line for line in commands), 2)
+            self.assertGreaterEqual(sum(line.startswith("start:") and ":systemctl:" in line for line in commands), 2)
             local = root / "etc" / "pi-vm" / "local"
             self.assertEqual(local.stat().st_mode & 0o777, 0o700)
             self.assertEqual((local / "nested").stat().st_mode & 0o777, 0o700)
             self.assertEqual((local / "nested" / "payload.bin").stat().st_mode & 0o777, 0o600)
             self.assertEqual((local / "bootstrap.sh").stat().st_mode & 0o777, 0o700)
             self.assertTrue((root / "state" / "samba-initial-password").stat().st_mode & 0o077 == 0)
+
+    @unittest.skipUnless(os.geteuid() == 0, "wrapper recovery test requires root")
+    def test_make_install_failure_persists_hostname_for_environment_free_retry(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            stage = root / "stage"
+            stage.mkdir()
+            shutil.copyfile(WRAPPER, stage / "bootstrap.sh")
+            (stage / "Makefile").write_text("bootstrap:\n\ttrue\n")
+            fake_bin = root / "bin"
+            fake_bin.mkdir()
+            calls = root / "calls"
+            attempt = root / "dnf-attempt"
+            fake = fake_bin / "fake-command"
+            fake.write_text(
+                "#!/usr/bin/bash\n"
+                "name=${0##*/}\n"
+                "case $name in\n"
+                "  hostnamectl) exit 1 ;;\n"
+                "  hostname) printf system-old\\n ;;\n"
+                "  id) exit 0 ;;\n"
+                "  dnf) if [[ ! -e $PI_DNF_ATTEMPT ]]; then : > $PI_DNF_ATTEMPT; exit 1; fi\n"
+                "    printf '#!/usr/bin/bash\\nprintf \\\'%s\\\\n\\\' \\\"$VM_HOSTNAME\\\" >> \\\"$PI_CALLS\\\"\\n' > $PI_FAKE_BIN/make\n"
+                "    chmod 0755 $PI_FAKE_BIN/make ;;\n"
+                "esac\n"
+            )
+            fake.chmod(0o755)
+            for command in ("hostnamectl", "hostname", "id", "dnf", "install", "chmod", "mktemp", "tee", "mv", "rm"):
+                (fake_bin / command).symlink_to(fake if command not in ("install", "chmod", "mktemp", "tee", "mv", "rm") else f"/usr/bin/{command}")
+            environment = {
+                **os.environ,
+                "PATH": str(fake_bin),
+                "PI_VM_STAGE": str(stage),
+                "PI_VM_STATE": str(root / "state"),
+                "PI_VM_RETRY_WRAPPER": str(root / "retry-wrapper"),
+                "VM_HOSTNAME": "seeded-name",
+                "PI_DNF_ATTEMPT": str(attempt),
+                "PI_CALLS": str(calls),
+                "PI_FAKE_BIN": str(fake_bin),
+            }
+            first = subprocess.run([str(WRAPPER)], env=environment, text=True, capture_output=True)
+            self.assertNotEqual(first.returncode, 0)
+            self.assertEqual((root / "state" / "hostname").read_text(), "seeded-name\\n")
+            self.assertTrue((root / "retry-wrapper").is_file())
+            environment.pop("VM_HOSTNAME")
+            second = subprocess.run([str(root / "retry-wrapper")], env=environment, text=True, capture_output=True)
+            self.assertEqual(second.returncode, 0, second.stderr)
+            self.assertEqual(calls.read_text().splitlines(), ["seeded-name"])
+            self.assertIn("hostname=seeded-name", (root / "state" / "bootstrap-complete").read_text())
 
     def test_wrapper_retries_failed_make_without_touching_host_paths(self):
         with tempfile.TemporaryDirectory() as directory:

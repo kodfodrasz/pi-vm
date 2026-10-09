@@ -9,6 +9,7 @@ export STAGE STATE
 LOG_FILE=$STATE/bootstrap.log
 FAILURE_MARKER=$STATE/bootstrap-failed
 SUCCESS_MARKER=$STATE/bootstrap-complete
+HOSTNAME_FILE=$STATE/hostname
 MAKEFILE=${PI_VM_MAKEFILE:-$STAGE/Makefile}
 RETRY_WRAPPER=${PI_VM_RETRY_WRAPPER:-/usr/local/sbin/pi-vm-bootstrap}
 recovered_from_failure=false
@@ -43,14 +44,28 @@ validate_inputs() {
         echo 'pi-vm bootstrap must run as root' >&2
         return 1
     fi
-    if [[ -z ${VM_HOSTNAME:-} ]]; then
-        VM_HOSTNAME=$(hostnamectl --static 2>/dev/null || hostname)
+    local candidate
+    if [[ ${VM_HOSTNAME+x} == x ]]; then
+        candidate=$VM_HOSTNAME
+    elif [[ -f $HOSTNAME_FILE ]]; then
+        candidate=$(<"$HOSTNAME_FILE")
+    else
+        candidate=$(hostnamectl --static 2>/dev/null || hostname)
     fi
-    validate_hostname "$VM_HOSTNAME"
+    validate_hostname "$candidate"
+    VM_HOSTNAME=$candidate
     export VM_HOSTNAME
     [[ -f $MAKEFILE ]] || { echo "missing Makefile: $MAKEFILE" >&2; return 1; }
     [[ -r $MAKEFILE ]] || return 1
     [[ -r $STAGE/bootstrap.sh ]] || { echo "missing bootstrap wrapper: $STAGE/bootstrap.sh" >&2; return 1; }
+}
+
+persist_hostname() {
+    local temporary
+    temporary=$(mktemp "$HOSTNAME_FILE.XXXXXX")
+    chmod 0644 "$temporary"
+    printf '%s\n' "$VM_HOSTNAME" > "$temporary"
+    mv -f -- "$temporary" "$HOSTNAME_FILE"
 }
 
 install_retry_wrapper() {
@@ -85,6 +100,7 @@ fi
 exec > >(tee -a "$LOG_FILE") 2>&1
 
 validate_inputs
+persist_hostname
 install_retry_wrapper
 if [[ -f $FAILURE_MARKER ]] \
         || { [[ -f $SUCCESS_MARKER ]] \

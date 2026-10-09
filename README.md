@@ -35,7 +35,11 @@ and hostname contract, installs `make` if needed, and invokes the staged
 installs the retry entrypoint at `/usr/local/sbin/pi-vm-bootstrap`. After a
 failure, inspect `/var/lib/pi-vm/bootstrap-failed` and rerun
 `sudo /usr/local/sbin/pi-vm-bootstrap`; a later successful retry keeps
-`recovered_from_failure=true` in the completion marker. The one-time Samba
+`recovered_from_failure=true` in the completion marker. The requested hostname
+precedence is explicit `VM_HOSTNAME`, then the validated atomic value in
+`/var/lib/pi-vm/hostname`, then the system hostname. The selected value is
+saved before any make or package installation, so an environment-free retry
+preserves the seed hostname. The one-time Samba
 password is intentionally printed to the bootstrap output (including
 cloud-init/serial output) and the root-only `/var/lib/pi-vm/bootstrap.log`;
 change it with `sudo smbpasswd pi`, then remove the saved value.
