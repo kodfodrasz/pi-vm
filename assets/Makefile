@@ -52,6 +52,7 @@ install-starship: remove-azure
 remove-azure: stage-configs
 stage-configs: install-packages
 install-packages: set-hostname
+install-packages: | $(BOOTSTRAP_BIN)
 set-hostname: validate-input
 
 validate-input:
@@ -86,7 +87,7 @@ remove-azure:
 $(CACHE):
 	install -d -m 0755 "$@"
 
-$(STARSHIP_ARCHIVE): | $(CACHE)
+$(STARSHIP_ARCHIVE): | $(CACHE) install-packages
 	temporary=$@.tmp
 	rm -f -- "$$temporary"
 	curl --fail --location --retry 3 "$(STARSHIP_URL)" -o "$$temporary"
@@ -94,7 +95,7 @@ $(STARSHIP_ARCHIVE): | $(CACHE)
 	chmod 0644 "$$temporary"
 	mv -f -- "$$temporary" "$@"
 
-$(STARSHIP_BIN): $(STARSHIP_ARCHIVE)
+$(STARSHIP_BIN): $(STARSHIP_ARCHIVE) | install-packages
 	install -d -m 0755 "$$(dirname "$@")"
 	temporary=$@.tmp
 	rm -f -- "$$temporary"
@@ -141,7 +142,11 @@ $(CONFIG)/AGENTS.md: $(STAGE)/pi/AGENTS.md | $(CONFIG)
 $(CONFIG)/kodfodrasz/SKILL.md: $(STAGE)/skills/kodfodrasz/SKILL.md | $(CONFIG)/kodfodrasz
 	install -m 0644 -o root -g root "$<" "$@"
 
-$(BOOTSTRAP_BIN): $(STAGE)/bootstrap.sh
+# Configuration files wait for validation and package availability, but keep
+# their normal timestamp behavior so retries do not rebuild them blindly.
+$(CONFIG_FILES): | install-packages
+
+$(BOOTSTRAP_BIN): $(STAGE)/bootstrap.sh | validate-input
 	install -D -m 0755 -o root -g root "$<" "$@"
 
 stage-configs: $(CONFIG_FILES) $(BOOTSTRAP_BIN)
@@ -151,6 +156,7 @@ stage-configs: $(CONFIG_FILES) $(BOOTSTRAP_BIN)
 		install -d -m 0700 -o root -g root $(CONFIG)/local
 		cp -a --no-preserve=ownership $(STAGE)/local/. $(CONFIG)/local/
 		find -P $(CONFIG)/local -exec chown -h root:root {} +
+		find -P $(CONFIG)/local -type d -exec chmod 0700 {} +
 		find -P $(CONFIG)/local -type f ! -name bootstrap.sh -exec chmod 0600 {} +
 		if [[ -f $(CONFIG)/local/bootstrap.sh ]]; then chmod 0700 $(CONFIG)/local/bootstrap.sh; fi
 	fi
@@ -188,6 +194,9 @@ configure-pi-user:
 	install -D -m 0644 -o pi -g pi "$(CONFIG)/AGENTS.md" "$(PI_HOME)/.pi/agent/AGENTS.md"
 	install -D -m 0644 -o pi -g pi "$(CONFIG)/kodfodrasz/SKILL.md" "$(PI_HOME)/.pi/agent/skills/kodfodrasz/SKILL.md"
 	install -d -m 0755 -o pi -g pi "$(PI_HOME)/.local/share/pi-npm" "$(PI_HOME)/.local/bin"
+	# Repair every existing tree before any command runs as pi. -P and -h
+	# make symlink ownership changes without dereferencing their targets.
+	find -P "$(PI_HOME)/.config" "$(PI_HOME)/.pi" "$(PI_HOME)/.local" -exec chown -h pi:pi {} +
 	runuser -u pi -- env HOME="$(PI_HOME)" npm install --global --prefix "$(PI_HOME)/.local/share/pi-npm" @earendil-works/pi-coding-agent@1.1.0
 	ln -sfn "$(PI_HOME)/.local/share/pi-npm/bin/pi" "$(PI_HOME)/.local/bin/pi"
 	chown -h pi:pi "$(PI_HOME)/.local/bin/pi"

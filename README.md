@@ -35,7 +35,10 @@ and hostname contract, installs `make` if needed, and invokes the staged
 installs the retry entrypoint at `/usr/local/sbin/pi-vm-bootstrap`. After a
 failure, inspect `/var/lib/pi-vm/bootstrap-failed` and rerun
 `sudo /usr/local/sbin/pi-vm-bootstrap`; a later successful retry keeps
-`recovered_from_failure=true` in the completion marker.
+`recovered_from_failure=true` in the completion marker. The one-time Samba
+password is intentionally printed to the bootstrap output (including
+cloud-init/serial output) and the root-only `/var/lib/pi-vm/bootstrap.log`;
+change it with `sudo smbpasswd pi`, then remove the saved value.
 
 ## Seed rendering
 

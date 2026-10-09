@@ -47,6 +47,13 @@ class GuestMakeTests(unittest.TestCase):
             root = Path(directory)
             stage = root / "stage"
             shutil.copytree(ROOT / "assets", stage)
+            local_source = stage / "local" / "nested"
+            local_source.mkdir(parents=True)
+            local_source.chmod(0o755)
+            (local_source / "payload.bin").write_bytes(b"payload")
+            (local_source / "payload.bin").chmod(0o644)
+            (stage / "local" / "bootstrap.sh").write_text("#!/usr/bin/bash\n")
+            (stage / "local" / "bootstrap.sh").chmod(0o700)
             fake_bin = root / "bin"
             fake_bin.mkdir()
             fake_log = root / "commands"
@@ -57,6 +64,7 @@ class GuestMakeTests(unittest.TestCase):
                 "printf '%s\\n' \"$name\" >> \"$PI_FAKE_LOG\"\n"
                 "case $name in\n"
                 "  rpm|pdbedit|id) exit 1 ;;\n"
+                "  dnf) [[ -z ${PI_FAKE_DELAY_DNF:-} ]] || sleep 0.05; if [[ -n ${PI_FAKE_FAIL_DNF:-} && -e $PI_FAKE_FAIL_DNF ]]; then rm -f -- $PI_FAKE_FAIL_DNF; exit 1; fi ;;\n"
                 "  curl) while [[ $# -gt 0 ]]; do [[ $1 == -o ]] && { shift; printf archive > \"$1\"; }; shift; done ;;\n"
                 "  tar) printf starship ;;\n"
                 "  sha256sum) ;;\n"
@@ -80,7 +88,7 @@ class GuestMakeTests(unittest.TestCase):
             fake_install.write_text(
                 "#!/usr/bin/bash\nargs=()\nwhile [[ $# -gt 0 ]]; do\n"
                 "  if [[ $1 == -o || $1 == -g ]]; then shift 2; else args+=(\"$1\"); shift; fi\n"
-                "done\nexec /usr/bin/install \"${args[@]}\"\n"
+                "done\nprintf 'install-args:%s\\n' \"${args[*]}\" >> \"$PI_FAKE_LOG\"\nexec /usr/bin/install \"${args[@]}\"\n"
             )
             fake_install.chmod(0o755)
             shell_file = root / "etc" / "shells"
@@ -89,6 +97,8 @@ class GuestMakeTests(unittest.TestCase):
             variables = {
                 "PATH": f"{fake_bin}:{os.environ['PATH']}",
                 "PI_FAKE_LOG": str(fake_log),
+                "PI_FAKE_DELAY_DNF": "1",
+                "PI_FAKE_FAIL_DNF": str(root / "fail-dnf"),
                 "STAGE": str(stage),
                 "CONFIG": str(root / "etc" / "pi-vm"),
                 "STATE": str(root / "state"),
@@ -110,6 +120,12 @@ class GuestMakeTests(unittest.TestCase):
                 "VM_HOSTNAME": "offline-test",
             }
             environment = {**os.environ, **variables}
+            (root / "fail-dnf").touch()
+            failed = subprocess.run(["make", "-j4", "--no-print-directory", "-f", str(MAKEFILE), "bootstrap"],
+                                    env=environment, text=True, capture_output=True)
+            self.assertNotEqual(failed.returncode, 0)
+            retry = root / "usr" / "local" / "sbin" / "pi-vm-bootstrap"
+            self.assertTrue(retry.is_file(), "retry wrapper must precede package failure")
             for _ in range(2):
                 result = subprocess.run(["make", "-j4", "--no-print-directory", "-f", str(MAKEFILE), "bootstrap"],
                                         env=environment, text=True, capture_output=True)
@@ -117,8 +133,17 @@ class GuestMakeTests(unittest.TestCase):
             commands = fake_log.read_text().splitlines()
             self.assertLess(commands.index("hostnamectl"), commands.index("dnf"))
             self.assertLess(commands.index("dnf"), commands.index("rpm"))
-            self.assertGreaterEqual(commands.count("dnf"), 2)
+            self.assertLess(commands.index("dnf"), commands.index("curl"))
+            config_install = next(i for i, line in enumerate(commands) if "authorized_keys" in line)
+            self.assertLess(commands.index("dnf"), config_install)
+            self.assertLess(commands.index("chown"), commands.index("runuser"))
+            self.assertGreaterEqual(commands.count("dnf"), 3)
             self.assertGreaterEqual(commands.count("systemctl"), 2)
+            local = root / "etc" / "pi-vm" / "local"
+            self.assertEqual(local.stat().st_mode & 0o777, 0o700)
+            self.assertEqual((local / "nested").stat().st_mode & 0o777, 0o700)
+            self.assertEqual((local / "nested" / "payload.bin").stat().st_mode & 0o777, 0o600)
+            self.assertEqual((local / "bootstrap.sh").stat().st_mode & 0o777, 0o700)
             self.assertTrue((root / "state" / "samba-initial-password").stat().st_mode & 0o077 == 0)
 
     def test_wrapper_retries_failed_make_without_touching_host_paths(self):
@@ -126,6 +151,7 @@ class GuestMakeTests(unittest.TestCase):
             root = Path(directory)
             stage = root / "stage"
             stage.mkdir()
+            shutil.copyfile(WRAPPER, stage / "bootstrap.sh")
             (stage / "Makefile").write_text("# fake graph\n")
             state = root / "state"
             fake_bin = root / "bin"
@@ -143,6 +169,7 @@ class GuestMakeTests(unittest.TestCase):
                 "PATH": f"{fake_bin}:{os.environ['PATH']}",
                 "PI_VM_STAGE": str(stage),
                 "PI_VM_STATE": str(state),
+                "PI_VM_RETRY_WRAPPER": str(state / "retry-wrapper"),
                 "VM_HOSTNAME": "offline-test",
                 "PI_TEST_CALLS": str(calls),
                 "PI_TEST_FAIL": str(root / "fail"),

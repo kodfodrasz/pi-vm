@@ -10,6 +10,7 @@ LOG_FILE=$STATE/bootstrap.log
 FAILURE_MARKER=$STATE/bootstrap-failed
 SUCCESS_MARKER=$STATE/bootstrap-complete
 MAKEFILE=${PI_VM_MAKEFILE:-$STAGE/Makefile}
+RETRY_WRAPPER=${PI_VM_RETRY_WRAPPER:-/usr/local/sbin/pi-vm-bootstrap}
 recovered_from_failure=false
 
 fail_bootstrap() {
@@ -49,6 +50,11 @@ validate_inputs() {
     export VM_HOSTNAME
     [[ -f $MAKEFILE ]] || { echo "missing Makefile: $MAKEFILE" >&2; return 1; }
     [[ -r $MAKEFILE ]] || return 1
+    [[ -r $STAGE/bootstrap.sh ]] || { echo "missing bootstrap wrapper: $STAGE/bootstrap.sh" >&2; return 1; }
+}
+
+install_retry_wrapper() {
+    install -D -m 0755 -o root -g root "$STAGE/bootstrap.sh" "$RETRY_WRAPPER"
 }
 
 ensure_make() {
@@ -79,6 +85,7 @@ fi
 exec > >(tee -a "$LOG_FILE") 2>&1
 
 validate_inputs
+install_retry_wrapper
 if [[ -f $FAILURE_MARKER ]] \
         || { [[ -f $SUCCESS_MARKER ]] \
             && grep -qx 'recovered_from_failure=true' "$SUCCESS_MARKER"; }; then
