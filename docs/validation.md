@@ -29,6 +29,7 @@ The host exposes AMD-V and `/dev/kvm`; the host KVM nested setting is on.
 | Reusable `make validate` with nested and balloon options | Pass on running `pipette` |
 | Real wrong-port validation against a second VM | Correctly rejected by instance ID |
 | Validator negative checks and balloon restoration unit tests | Pass, 20 tests |
+| KVM process identity, PID handles, and input guards | Pass, 17 offline tests |
 | Below-source KVM disk size rejected before instance creation | Pass |
 | Seed ISO label and root files | Pass, `CIDATA`, `user-data`, `meta-data` |
 | UTF-8 BOM / CRLF source normalization | Pass, identical Linux seed output |
@@ -136,6 +137,35 @@ checks remain open. The deployed KVM VM stayed running during this pass.
 Further guest checks passed: a real rootless Alpine container and another
 balloon resize, from 2 GiB to 1.75 GiB, followed by restoration to 2 GiB.
 Logs are `build/hyperv-mock.log` and `~/.cache/pi-vm/host/hardening-guest.log`.
+
+## KVM process safety
+
+The first worker timed out and its resume was stopped. Partial changes were
+saved in `build/agent-recovery/`. The parent finished the bounded fix directly.
+
+The launcher now checks the process executable and the exact `-drive` file
+argument. An unrelated process with QEMU words in its arguments is not enough.
+A `.qcow2.backup` suffix or duplicate file option does not match. PID files
+must be small regular files, not symlinks or pipes.
+
+Forced stop pins a Linux PID handle before rechecking identity. It sends TERM
+through that handle, not a reusable PID number. Missing API support, a process
+that has exited, or an identity mismatch fails without an unsafe fallback.
+Tests cover handle order and cleanup. One real test-owned Python process
+survives status and forced-stop checks despite having the old matching words
+in its arguments. Another test-owned process verifies native PID-handle TERM.
+No test starts or stops a real VM.
+
+Resource validation is bounded and decimal. Invalid actions, missing values,
+size overflow, and comma-containing build paths fail before creating storage.
+The active-instance check also runs before downloads. The Makefile discovers
+only the two unit-test modules and keeps their scratch files on disk; it does
+not accidentally import the footer integration script a second time.
+
+A bounded fresh-context Terra review returned **OK**, with no issues found.
+The full host suite and `make validate` passed. Logs are
+`build/kvm-safety-host-tests.log` and `build/kvm-safety-runtime.log`.
+`pipette` kept its original PID 355892 and was never stopped or restarted.
 
 ## Reusable guest validator
 

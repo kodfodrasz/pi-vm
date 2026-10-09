@@ -101,6 +101,18 @@ file. Do not blindly disable host-key checks on a reused port.
 Host logs are `build/ID/serial.log` and `build/ID/qemu.log`. VM control uses a
 local QMP socket in the same directory. Treat your build directory as private.
 
+Process checks require the QEMU executable and an exact disk argument, not
+just matching words in a command line. Forced stop uses a Linux PID handle,
+which prevents a recycled PID from receiving the signal. It refuses to stop
+if that API is unavailable; there is no unsafe numeric-PID fallback. Graceful
+stop still uses QMP. Neither stop mode deletes disks.
+
+Resource values are decimal, including values with leading zeros. The launcher
+accepts 512 MiB–1 TiB RAM, 1–1024 CPUs, and 5 GiB–64 TiB disks (`G` or `M`
+suffixes). These are input limits, not a promise that your host has that much
+capacity. Build paths can contain spaces, but not commas or line breaks, which
+would change QEMU option parsing. Instance directories cannot be symlinks.
+
 ### Storage
 
 Downloaded images stay in `~/.cache/pi-vm/images`. VM disks, ISOs, logs, and test

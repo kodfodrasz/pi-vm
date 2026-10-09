@@ -21,4 +21,5 @@ validate:
 test:
 	mkdir -p build/test-tmp
 	TMPDIR="$(CURDIR)/build/test-tmp" bash tests/host.sh
-	python3 -m unittest discover -s tests -p validate.py
+	TMPDIR="$(CURDIR)/build/test-tmp" python3 -m unittest discover -s tests -p validate.py
+	TMPDIR="$(CURDIR)/build/test-tmp" python3 -m unittest discover -s tests -p kvm.py
