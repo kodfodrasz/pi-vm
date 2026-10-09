@@ -141,11 +141,12 @@ Logs are `build/hyperv-mock.log` and `~/.cache/pi-vm/host/hardening-guest.log`.
 
 ## Launcher readability refactor
 
-Both launchers now use named functions with short orchestration flows. The
-Bash start flow separates preflight, image verification, disk preparation, and
-QEMU launch. QEMU arguments are one option per line. The PowerShell flow uses
-explicit settings and creation-state objects; cache checks, base conversion,
-VM setup, and rollback are separate functions. No generic framework was added.
+Both launchers use short entrypoints and cohesive workflow functions. The Bash
+script has 11 functions for parsing, validation, storage preparation, QEMU
+launch, status, and shutdown. The PowerShell script has 13 functions for
+settings, validation, image caching, disk creation, VM configuration, and
+rollback. One-use wrapper chains are avoided. QEMU arguments are one option per
+line, and related rollback operations stay together.
 
 All existing tests passed. Two added Windows mock cases verify that status and
 stop do not run start-only validation or create storage, bringing that suite
@@ -156,9 +157,12 @@ The refactored Bash launcher started the existing stopped `final-smoke` test
 VM with 1 CPU, 1024 MiB RAM, and an 8 GiB disk. Runtime validation passed through
 SSH port 2223, then graceful QMP shutdown was requested and the VM stopped.
 The virtio NIC now explicitly names the `net0` backend. `pipette` was untouched.
-The final bounded Terra recheck returned **OK**, with no issues found.
-Logs are `build/structured-host-tests.log` and `build/structured-live.log`;
-the guest report is `build/final-smoke/structured-validation.json`.
+A second live lifecycle test passed after flattening the function structure:
+start, validate, graceful stop, restart, validate, and graceful stop. The final
+bounded Terra review returned **OK**, including behavior preservation and
+conformance with the Kodfodrasz style. Logs are
+`build/kodfodrasz-host-tests.log` and `build/kodfodrasz-live.log`; the guest
+report is `build/final-smoke/kodfodrasz-validation.json`.
 
 ## KVM process safety
 

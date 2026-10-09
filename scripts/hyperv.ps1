@@ -18,14 +18,14 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 
-function New-PiVmSettings {
+function Get-PiVmSettings {
     if ($Id -notmatch '^[A-Za-z0-9][A-Za-z0-9_.-]{0,100}$') {
         throw 'Invalid instance id'
     }
 
     $buildDirectory = [IO.Path]::GetFullPath($Build)
-    return [pscustomobject]@{
-        InstanceId = $Id
+    [pscustomobject]@{
+        Id = $Id
         VmName = "pi-vm-$Id"
         InstanceDirectory = Join-Path $buildDirectory $Id
         BuildDirectory = $buildDirectory
@@ -52,7 +52,7 @@ function ConvertTo-DiskBytes($Size) {
     if ($bytes -lt 5368709120L -or $bytes % 1MB) {
         throw 'Disk size must be at least 5 GiB and aligned to 1 MiB'
     }
-    return $bytes
+    $bytes
 }
 
 function Assert-StartSettings($Settings) {
@@ -75,28 +75,7 @@ function Assert-StartSettings($Settings) {
     }
 }
 
-function Restart-ExistingVm($Settings) {
-    $existing = Get-VM -Name $Settings.VmName -ErrorAction SilentlyContinue
-    if (-not $existing) {
-        return $false
-    }
-    if ($Settings.Force) {
-        throw 'Force cannot replace a registered VM. Remove the VM explicitly first.'
-    }
-    if ($existing.State -ne 'Off') {
-        throw "VM is not stopped: $($Settings.VmName)"
-    }
-    $marker = Join-Path $Settings.InstanceDirectory 'creation-complete'
-    if (-not (Test-Path $marker)) {
-        throw "VM is registered but incomplete; inspect it before removing it: $($Settings.VmName)"
-    }
-
-    Start-VM -Name $Settings.VmName | Out-Null
-    Write-Host "Restarted $($Settings.VmName) with its existing settings and disk"
-    return $true
-}
-
-function Get-StorageVolumeForPath($Path) {
+function Get-StorageVolume($Path) {
     $ancestor = $Path
     while (-not (Test-Path -LiteralPath $ancestor)) {
         $parent = Split-Path -Parent $ancestor
@@ -113,103 +92,36 @@ function Get-StorageVolumeForPath($Path) {
     if (-not $volume.UniqueId) {
         throw 'Storage volume has no unique ID'
     }
-    return $volume
+    $volume
 }
 
 function Assert-StorageCapacity($Settings) {
-    $requirements = @(
+    $required = @{}
+    foreach ($item in @(
         @{ Path = $Settings.CacheDirectory; Bytes = 8GB }
         @{ Path = $Settings.BuildDirectory; Bytes = 12GB }
-    )
-    $volumes = @{}
-    foreach ($requirement in $requirements) {
-        $volume = Get-StorageVolumeForPath $requirement.Path
+    )) {
+        $volume = Get-StorageVolume $item.Path
         $volumeId = [string]$volume.UniqueId
-        if (-not $volumes.ContainsKey($volumeId)) {
-            $volumes[$volumeId] = @{ FreeBytes = [Int64]$volume.SizeRemaining; RequiredBytes = 0L }
+        if (-not $required.ContainsKey($volumeId)) {
+            $required[$volumeId] = @{
+                FreeBytes = [Int64]$volume.SizeRemaining
+                RequiredBytes = 0L
+            }
         }
-        $volumes[$volumeId].RequiredBytes += $requirement.Bytes
+        $required[$volumeId].RequiredBytes += $item.Bytes
     }
-    foreach ($volumeId in $volumes.Keys) {
-        $capacity = $volumes[$volumeId]
+
+    foreach ($volumeId in $required.Keys) {
+        $capacity = $required[$volumeId]
         if ($capacity.FreeBytes -lt $capacity.RequiredBytes) {
             throw "Insufficient free space on $volumeId (need $($capacity.RequiredBytes / 1GB) GiB)"
         }
     }
 }
 
-function Assert-NewVmPrerequisites($Settings) {
-    Get-VMSwitch -Name $Settings.SwitchName -ErrorAction Stop | Out-Null
-    if ((Test-Path $Settings.InstanceDirectory) -and -not $Settings.Force) {
-        throw 'Instance files exist; -Force explicitly recreates them'
-    }
-    Assert-StorageCapacity $Settings
-}
-
-function Initialize-StorageDirectories($Settings) {
-    $directories = @($Settings.BuildDirectory, $Settings.CacheDirectory)
-    New-Item -ItemType Directory -Force -Path $directories | Out-Null
-}
-
-function Open-BuildLock($Settings) {
-    $path = Join-Path $Settings.BuildDirectory '.hyperv.lock'
-    return [IO.File]::Open($path, [IO.FileMode]::OpenOrCreate,
-                          [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
-}
-
-function Assert-VmNotRegistered($Settings) {
-    if (Get-VM -Name $Settings.VmName -ErrorAction SilentlyContinue) {
-        throw "VM exists: $($Settings.VmName)"
-    }
-}
-
-function Prepare-SeedIso($Settings) {
-    if ($Settings.SeedIso) {
-        return
-    }
-    $seedDirectory = Join-Path $Settings.BuildDirectory 'seeds'
-    $Settings.SeedIso = Join-Path $seedDirectory "$($Settings.InstanceId).iso"
-    if (-not (Test-Path -LiteralPath $Settings.SeedIso)) {
-        New-Item -ItemType Directory -Force -Path $seedDirectory | Out-Null
-        & "$PSScriptRoot/seed.ps1" -Id $Settings.InstanceId `
-            -Hostname $Settings.Hostname -OutputIso $Settings.SeedIso
-    }
-}
-
-function Prepare-InstanceDirectory($Settings, $Creation) {
-    if (Test-Path $Settings.InstanceDirectory) {
-        if (-not $Settings.Force) {
-            throw 'Instance files exist; -Force explicitly recreates them'
-        }
-        Remove-Item -LiteralPath $Settings.InstanceDirectory -Recurse -Force
-    }
-    New-Item -ItemType Directory -Path $Settings.InstanceDirectory | Out-Null
-    $Creation.OwnedInstance = $true
-}
-
-function Get-FedoraImageSettings($CacheDirectory) {
-    return [pscustomobject]@{
-        ArchivePath = Join-Path $CacheDirectory 'Fedora-Cloud-Base-AmazonEC2-44-1.7.x86_64.raw.xz'
-        RawPath = Join-Path $CacheDirectory 'Fedora-Cloud-Base-AmazonEC2-44-1.7.x86_64.raw'
-        Url = 'https://download.fedoraproject.org/pub/fedora/linux/releases/44/Cloud/x86_64/images/Fedora-Cloud-Base-AmazonEC2-44-1.7.x86_64.raw.xz'
-        ArchiveHash = '7e4fb73907abdc761d226ddaf3263bdfca62a0b0bfb5f0798545a9981fdd1953'
-        RawHash = 'ccf0412fa9e3f7d8ce8824e03e3c7369d0fef6dffb00a786a6bc9e895ccdb9ce'
-        RawSize = 5368709120L
-    }
-}
-
-function Test-FileHash($Path, $ExpectedHash) {
-    return (Test-Path $Path) -and `
-        (Get-FileHash $Path -Algorithm SHA256).Hash.ToLowerInvariant() -eq $ExpectedHash
-}
-
-function Test-RawImage($Path, $Image) {
-    return (Test-Path $Path) -and (Get-Item $Path).Length -eq $Image.RawSize -and `
-        (Test-FileHash $Path $Image.RawHash)
-}
-
-# These APIs also work in Windows PowerShell 5.1.
 function Move-FileIntoPlace($Source, $Destination) {
+    # These overloads work in Windows PowerShell 5.1.
     if (Test-Path -LiteralPath $Destination) {
         [IO.File]::Replace($Source, $Destination, [NullString]::Value)
     } else {
@@ -217,58 +129,67 @@ function Move-FileIntoPlace($Source, $Destination) {
     }
 }
 
-function Prepare-ImageArchive($Settings, $Image) {
-    if (Test-FileHash $Image.ArchivePath $Image.ArchiveHash) {
-        return
-    }
-    $download = Join-Path $Settings.CacheDirectory ('.download-' + [Guid]::NewGuid().ToString('N'))
-    try {
-        Invoke-WebRequest $Image.Url -OutFile $download -UseBasicParsing
-        if (-not (Test-FileHash $download $Image.ArchiveHash)) {
-            throw 'Compressed image SHA-256 mismatch'
-        }
-        Move-FileIntoPlace $download $Image.ArchivePath
-    } finally {
-        Remove-Item -LiteralPath $download -Force -ErrorAction SilentlyContinue
-    }
-}
-
-function Prepare-RawImage($Settings, $Image) {
-    if (Test-RawImage $Image.RawPath $Image) {
-        return
-    }
-    $stage = Join-Path $Settings.CacheDirectory ('.raw-stage-' + [Guid]::NewGuid().ToString('N'))
-    New-Item -ItemType Directory -Path $stage | Out-Null
-    try {
-        if (-not (Get-Command 7z -ErrorAction SilentlyContinue)) {
-            throw 'Install 7-Zip and put 7z.exe in PATH'
-        }
-        & 7z x $Image.ArchivePath "-o$stage" -y | Out-Null
-        if ($LASTEXITCODE) {
-            throw '7-Zip decompression failed'
-        }
-        $candidate = Join-Path $stage (Split-Path $Image.RawPath -Leaf)
-        if (-not (Test-RawImage $candidate $Image)) {
-            throw 'Raw image size/SHA-256 mismatch'
-        }
-        Move-FileIntoPlace $candidate $Image.RawPath
-    } finally {
-        Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue
-    }
+function Test-FileHash($Path, $ExpectedHash) {
+    (Test-Path $Path) -and
+        (Get-FileHash $Path -Algorithm SHA256).Hash.ToLowerInvariant() -eq $ExpectedHash
 }
 
 function Get-VerifiedRawImage($Settings) {
-    $image = Get-FedoraImageSettings $Settings.CacheDirectory
+    $archive = Join-Path $Settings.CacheDirectory 'Fedora-Cloud-Base-AmazonEC2-44-1.7.x86_64.raw.xz'
+    $raw = Join-Path $Settings.CacheDirectory 'Fedora-Cloud-Base-AmazonEC2-44-1.7.x86_64.raw'
+    $url = 'https://download.fedoraproject.org/pub/fedora/linux/releases/44/Cloud/x86_64/images/Fedora-Cloud-Base-AmazonEC2-44-1.7.x86_64.raw.xz'
+    $archiveHash = '7e4fb73907abdc761d226ddaf3263bdfca62a0b0bfb5f0798545a9981fdd1953'
+    $rawHash = 'ccf0412fa9e3f7d8ce8824e03e3c7369d0fef6dffb00a786a6bc9e895ccdb9ce'
+    $rawSize = 5368709120L
+
     $lockPath = Join-Path $Settings.CacheDirectory '.download.lock'
     $cacheLock = [IO.File]::Open($lockPath, [IO.FileMode]::OpenOrCreate,
-                               [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+                                [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
     try {
-        Prepare-ImageArchive $Settings $image
-        Prepare-RawImage $Settings $image
+        if (-not (Test-FileHash $archive $archiveHash)) {
+            $download = Join-Path $Settings.CacheDirectory ('.download-' + [Guid]::NewGuid().ToString('N'))
+            try {
+                Invoke-WebRequest $url -OutFile $download -UseBasicParsing
+                if (-not (Test-FileHash $download $archiveHash)) {
+                    throw 'Compressed image SHA-256 mismatch'
+                }
+                Move-FileIntoPlace $download $archive
+            } finally {
+                Remove-Item -LiteralPath $download -Force -ErrorAction SilentlyContinue
+            }
+        }
+
+        $rawIsValid = (Test-Path $raw) -and (Get-Item $raw).Length -eq $rawSize
+        if ($rawIsValid) {
+            $rawIsValid = Test-FileHash $raw $rawHash
+        }
+        if (-not $rawIsValid) {
+            $stage = Join-Path $Settings.CacheDirectory ('.raw-stage-' + [Guid]::NewGuid().ToString('N'))
+            New-Item -ItemType Directory -Path $stage | Out-Null
+            try {
+                if (-not (Get-Command 7z -ErrorAction SilentlyContinue)) {
+                    throw 'Install 7-Zip and put 7z.exe in PATH'
+                }
+                & 7z x $archive "-o$stage" -y | Out-Null
+                if ($LASTEXITCODE) {
+                    throw '7-Zip decompression failed'
+                }
+                $candidate = Join-Path $stage (Split-Path $raw -Leaf)
+                $candidateIsValid = (Test-Path $candidate) -and
+                    (Get-Item $candidate).Length -eq $rawSize -and
+                    (Test-FileHash $candidate $rawHash)
+                if (-not $candidateIsValid) {
+                    throw 'Raw image size/SHA-256 mismatch'
+                }
+                Move-FileIntoPlace $candidate $raw
+            } finally {
+                Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue
+            }
+        }
     } finally {
         $cacheLock.Dispose()
     }
-    return $image.RawPath
+    $raw
 }
 
 function Get-OrCreateBaseDisk($Settings, $Creation, $RawPath) {
@@ -290,24 +211,15 @@ function Get-OrCreateBaseDisk($Settings, $Creation, $RawPath) {
     Convert-VHD -Path $fixed -DestinationPath $Creation.PartialBase -VHDType Dynamic
     Resize-VHD -Path $Creation.PartialBase -SizeBytes $Settings.DiskBytes
     [IO.File]::Move($Creation.PartialBase, $base)
-    return $base
+    $base
 }
 
-function New-InstanceDisk($Settings, $BasePath) {
-    $child = Join-Path $Settings.InstanceDirectory 'disk.vhdx'
-    New-VHD -Path $child -ParentPath $BasePath -Differencing | Out-Null
-    return $child
-}
-
-function Register-NewVm($Settings, $Creation, $DiskPath) {
+function Configure-Vm($Settings, $Creation, $DiskPath) {
     New-VM -Name $Settings.VmName -Generation 2 `
         -MemoryStartupBytes ($Settings.MemoryMB * 1MB) `
         -VHDPath $DiskPath -SwitchName $Settings.SwitchName | Out-Null
-    # Only mark success after New-VM returns. Rollback also checks ambiguous failures.
-    $Creation.CreatedVm = $true
-}
+    $Creation.RegisteredVm = $true
 
-function Configure-NewVm($Settings) {
     Set-VMProcessor -VMName $Settings.VmName -Count $Settings.CpuCount `
         -ExposeVirtualizationExtensions $true
     Set-VMFirmware -VMName $Settings.VmName -EnableSecureBoot Off
@@ -321,80 +233,89 @@ function Configure-NewVm($Settings) {
     Add-VMDvdDrive -VMName $Settings.VmName -Path $Settings.SeedIso | Out-Null
 }
 
-function Complete-VmCreation($Settings) {
-    $marker = Join-Path $Settings.InstanceDirectory 'creation-complete'
-    Set-Content -LiteralPath $marker -Value 'complete' -NoNewline
-}
-
-function Start-CreatedVm($Settings) {
-    Start-VM -Name $Settings.VmName | Out-Null
-    Write-Host "Started $($Settings.VmName); console: vmconnect.exe localhost $($Settings.VmName)"
-}
-
-function Remove-CreatedVm($Settings) {
-    try {
-        $current = Get-VM -Name $Settings.VmName -ErrorAction SilentlyContinue
-        if ($current -and $current.State -ne 'Off') {
-            Stop-VM -Name $Settings.VmName -TurnOff -Force -ErrorAction Stop
-        }
-        Remove-VM -Name $Settings.VmName -Force -ErrorAction Stop
-    } catch {
-        Write-Warning "VM rollback failed; keep instance files and inspect $($Settings.VmName): $_"
-    }
-}
-
-function Test-VmRegistrationAbsent($Settings) {
-    try {
-        return -not (Get-VM -Name $Settings.VmName -ErrorAction Stop)
-    } catch {
-        if ($_.CategoryInfo.Category -eq 'ObjectNotFound') {
-            return $true
-        }
-        Write-Warning 'Cannot confirm VM removal; keeping instance files'
-        return $false
-    }
-}
-
 function Undo-VmCreation($Settings, $Creation) {
-    if ($Creation.CreatedVm) {
-        Remove-CreatedVm $Settings
+    if ($Creation.RegisteredVm) {
+        try {
+            $vm = Get-VM -Name $Settings.VmName -ErrorAction SilentlyContinue
+            if ($vm -and $vm.State -ne 'Off') {
+                Stop-VM -Name $Settings.VmName -TurnOff -Force -ErrorAction Stop
+            }
+            Remove-VM -Name $Settings.VmName -Force -ErrorAction Stop
+        } catch {
+            Write-Warning "VM rollback failed; keep instance files and inspect $($Settings.VmName): $_"
+        }
     }
     if ($Creation.PartialBase) {
         Remove-Item -LiteralPath $Creation.PartialBase -Force -ErrorAction SilentlyContinue
     }
-    if ($Creation.OwnedInstance) {
-        # New-VM may have registered a VM even if it threw. Retain disks on uncertainty.
-        if (Test-VmRegistrationAbsent $Settings) {
-            Remove-Item -LiteralPath $Settings.InstanceDirectory -Recurse -Force -ErrorAction SilentlyContinue
+    if (-not $Creation.OwnedInstance) {
+        return
+    }
+
+    # New-VM may register a VM before it reports failure. Keep disks unless absence is certain.
+    $safeToRemove = $false
+    try {
+        $safeToRemove = -not (Get-VM -Name $Settings.VmName -ErrorAction Stop)
+    } catch {
+        if ($_.CategoryInfo.Category -eq 'ObjectNotFound') {
+            $safeToRemove = $true
         } else {
-            Write-Warning "Instance retained at $($Settings.InstanceDirectory); inspect the registered VM before manual cleanup"
+            Write-Warning 'Cannot confirm VM removal; keeping instance files'
         }
     }
-}
-
-function New-VmCreationState {
-    return [pscustomobject]@{
-        OwnedInstance = $false
-        CreatedVm = $false
-        PartialBase = $null
+    if ($safeToRemove) {
+        Remove-Item -LiteralPath $Settings.InstanceDirectory -Recurse -Force -ErrorAction SilentlyContinue
+    } else {
+        Write-Warning "Instance retained at $($Settings.InstanceDirectory); inspect the registered VM before manual cleanup"
     }
 }
 
-function Start-NewVm($Settings) {
-    Initialize-StorageDirectories $Settings
-    $buildLock = Open-BuildLock $Settings
-    $creation = New-VmCreationState
+function New-PiVm($Settings) {
+    New-Item -ItemType Directory -Force `
+        -Path $Settings.BuildDirectory, $Settings.CacheDirectory | Out-Null
+    $lockPath = Join-Path $Settings.BuildDirectory '.hyperv.lock'
+    $buildLock = [IO.File]::Open($lockPath, [IO.FileMode]::OpenOrCreate,
+                                [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+    $creation = [pscustomobject]@{
+        OwnedInstance = $false
+        RegisteredVm = $false
+        PartialBase = $null
+    }
+
     try {
-        Assert-VmNotRegistered $Settings
-        Prepare-SeedIso $Settings
-        Prepare-InstanceDirectory $Settings $creation
-        $rawImagePath = Get-VerifiedRawImage $Settings
-        $baseDiskPath = Get-OrCreateBaseDisk $Settings $creation $rawImagePath
-        $instanceDiskPath = New-InstanceDisk $Settings $baseDiskPath
-        Register-NewVm $Settings $creation $instanceDiskPath
-        Configure-NewVm $Settings
-        Complete-VmCreation $Settings
-        Start-CreatedVm $Settings
+        if (Get-VM -Name $Settings.VmName -ErrorAction SilentlyContinue) {
+            throw "VM exists: $($Settings.VmName)"
+        }
+
+        if (-not $Settings.SeedIso) {
+            $seedDirectory = Join-Path $Settings.BuildDirectory 'seeds'
+            $Settings.SeedIso = Join-Path $seedDirectory "$($Settings.Id).iso"
+            if (-not (Test-Path -LiteralPath $Settings.SeedIso)) {
+                New-Item -ItemType Directory -Force -Path $seedDirectory | Out-Null
+                & "$PSScriptRoot/seed.ps1" -Id $Settings.Id `
+                    -Hostname $Settings.Hostname -OutputIso $Settings.SeedIso
+            }
+        }
+
+        if (Test-Path $Settings.InstanceDirectory) {
+            if (-not $Settings.Force) {
+                throw 'Instance files exist; -Force explicitly recreates them'
+            }
+            Remove-Item -LiteralPath $Settings.InstanceDirectory -Recurse -Force
+        }
+        New-Item -ItemType Directory -Path $Settings.InstanceDirectory | Out-Null
+        $creation.OwnedInstance = $true
+
+        $rawPath = Get-VerifiedRawImage $Settings
+        $basePath = Get-OrCreateBaseDisk $Settings $creation $rawPath
+        $childPath = Join-Path $Settings.InstanceDirectory 'disk.vhdx'
+        New-VHD -Path $childPath -ParentPath $basePath -Differencing | Out-Null
+
+        Configure-Vm $Settings $creation $childPath
+        $marker = Join-Path $Settings.InstanceDirectory 'creation-complete'
+        Set-Content -LiteralPath $marker -Value 'complete' -NoNewline
+        Start-VM -Name $Settings.VmName | Out-Null
+        Write-Host "Started $($Settings.VmName); console: vmconnect.exe localhost $($Settings.VmName)"
     } catch {
         $failure = $_
         Undo-VmCreation $Settings $creation
@@ -406,31 +327,39 @@ function Start-NewVm($Settings) {
 
 function Start-PiVm($Settings) {
     Assert-StartSettings $Settings
-    if (Restart-ExistingVm $Settings) {
+
+    $existing = Get-VM -Name $Settings.VmName -ErrorAction SilentlyContinue
+    if ($existing) {
+        if ($Settings.Force) {
+            throw 'Force cannot replace a registered VM. Remove the VM explicitly first.'
+        }
+        if ($existing.State -ne 'Off') {
+            throw "VM is not stopped: $($Settings.VmName)"
+        }
+        $marker = Join-Path $Settings.InstanceDirectory 'creation-complete'
+        if (-not (Test-Path $marker)) {
+            throw "VM is registered but incomplete; inspect it before removing it: $($Settings.VmName)"
+        }
+        Start-VM -Name $Settings.VmName | Out-Null
+        Write-Host "Restarted $($Settings.VmName) with its existing settings and disk"
         return
     }
-    Assert-NewVmPrerequisites $Settings
-    Start-NewVm $Settings
+
+    Get-VMSwitch -Name $Settings.SwitchName -ErrorAction Stop | Out-Null
+    if ((Test-Path $Settings.InstanceDirectory) -and -not $Settings.Force) {
+        throw 'Instance files exist; -Force explicitly recreates them'
+    }
+    Assert-StorageCapacity $Settings
+    New-PiVm $Settings
 }
 
-function Show-PiVmStatus($Settings) {
-    Get-VM -Name $Settings.VmName -ErrorAction SilentlyContinue |
-        Select-Object Name, State, Status
-}
-
-function Stop-PiVm($Settings) {
-    Stop-VM -Name $Settings.VmName -ErrorAction Stop
-}
-
-# Entry point: use the real module, resolve settings, then dispatch.
 Import-Module Hyper-V -ErrorAction Stop
-$settings = New-PiVmSettings
-# Avoid a switch statement: its automatic $switch variable conflicts with
-# the public -Switch parameter used to select a Hyper-V network.
+$settings = Get-PiVmSettings
 if ($Action -eq 'start') {
     Start-PiVm $settings
 } elseif ($Action -eq 'stop') {
-    Stop-PiVm $settings
+    Stop-VM -Name $settings.VmName -ErrorAction Stop
 } else {
-    Show-PiVmStatus $settings
+    Get-VM -Name $settings.VmName -ErrorAction SilentlyContinue |
+        Select-Object Name, State, Status
 }
