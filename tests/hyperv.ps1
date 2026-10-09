@@ -33,26 +33,23 @@ function New-Case([bool]$Prepare=$true) {
     SplitVolumes=$false
     CacheFree=100GB
     BuildFree=100GB
-    BaseSize=16GB
+    BaseSize=5GB
     RawCorrupt=$false
+    PayloadCorrupt=$false
     Cache=$script:cache
   }
   Set-PiVmMockState $script:state
   if($Prepare){
     New-Item -ItemType Directory -Path $script:build,$script:cache | Out-Null
-    $archive=Join-Path $script:cache 'Fedora-Cloud-Base-AmazonEC2-44-1.7.x86_64.raw.xz'
+    $archive=Join-Path $script:cache 'Fedora-Cloud-Base-Azure-44-1.7.x86_64.vhdfixed.xz'
     [IO.File]::WriteAllText($archive,'mock archive')
-    $raw=Join-Path $script:cache 'Fedora-Cloud-Base-AmazonEC2-44-1.7.x86_64.raw'
-    $file=[IO.File]::Open($raw,[IO.FileMode]::Create)
+    $fixed=Join-Path $script:cache 'Fedora-Cloud-Base-Azure-44-1.7.x86_64.vhd'
+    $file=[IO.File]::Open($fixed,[IO.FileMode]::Create)
     try {
       $bytes=[Text.Encoding]::ASCII.GetBytes('original')
       $file.Write($bytes,0,$bytes.Length)
-      $file.SetLength(5368709120L)
-    } finally {
-      $file.Dispose()
-    }
-    # Conversion is mocked; the real fixed-VHD writer has separate content tests.
-    [IO.File]::WriteAllText((Join-Path $script:build 'fedora44-base-17179869184.vhd'),'mock fixed VHD')
+      $file.SetLength(5368709632L)
+    } finally {$file.Dispose()}
   }
   $script:options=@{Action='start';Id='test';Build=$script:build;Cache=$script:cache;SeedIso=$script:seed}
   $script:count++
@@ -89,9 +86,9 @@ try {
   $options.Force=$true; Expect-Failure 'Force cannot replace'; Assert ($state.Calls.Count -eq 0) 'Force changed a registered VM'
   New-Case $false; $state.VM=[pscustomobject]@{Name='pi-vm-test';State='Off'}; Expect-Failure 'incomplete'
   New-Case $false; $state.Fail='switch'; Expect-Failure 'switch'; Assert (-not(Test-Path $build)) 'Missing switch created build state'
-  New-Case $false; $state.Free=10GB; Expect-Failure '20 GiB'; Assert (-not(Test-Path $build)) 'Space preflight created build state'
-  New-Case; $state.SplitVolumes=$true; $state.CacheFree=7GB; Expect-Failure '8 GiB'; Assert-No-Instance
-  New-Case; $state.SplitVolumes=$true; $state.BuildFree=11GB; Expect-Failure '12 GiB'; Assert-No-Instance
+  New-Case $false; $state.Free=30GB; Expect-Failure '32 GiB'; Assert (-not(Test-Path $build)) 'Space preflight created build state'
+  New-Case; $state.SplitVolumes=$true; $state.CacheFree=11GB; Expect-Failure '12 GiB'; Assert-No-Instance
+  New-Case; $state.SplitVolumes=$true; $state.BuildFree=19GB; Expect-Failure '20 GiB'; Assert-No-Instance
 
   # First creation: conversion and resize must precede the differencing child.
   New-Case; & $scriptPath @options
@@ -101,19 +98,26 @@ try {
   Assert ($state.Calls.IndexOf('convert') -lt $state.Calls.IndexOf('resize')) 'Wrong conversion ordering'
   Assert ($state.Calls.IndexOf('resize') -lt $state.Calls.IndexOf('child')) 'Base resize happened after child creation'
   Assert (Test-Path (Join-Path $build 'test/creation-complete')) 'Successful configuration has no marker'
+
+  New-Case; $options.DiskSize='5GiB'; & $scriptPath @options
+  Assert (-not $state.Calls.Contains('resize')) 'Equal source size was unnecessarily resized'
   $state.VM.State='Off'; $state.Calls.Clear(); & $scriptPath @options
   Assert ($state.Calls.Count -eq 1 -and $state.Calls[0] -eq 'start') 'Restart rebuilt or reconfigured a disk'
 
-  New-Case; [IO.File]::WriteAllText((Join-Path $build 'fedora44-base-17179869184.vhdx'),'existing base'); $options.DynamicMemory=$true
+  New-Case; $state.BaseSize=16GB; [IO.File]::WriteAllText((Join-Path $build 'fedora44-azure-base-17179869184.vhdx'),'existing base'); $options.DynamicMemory=$true
   & $scriptPath @options
   Assert (-not $state.Calls.Contains('convert') -and -not $state.Calls.Contains('resize')) 'Reused base was modified'
   Assert ($state.Calls.Contains('dynamic:True')) 'Dynamic RAM opt-in missing'
+
+  # A changed payload must be rejected even when its VHD metadata remains valid.
+  New-Case; $state.PayloadCorrupt=$true; Expect-Failure 'fixed VHD'
+  Assert (-not(Get-ChildItem $cache -Filter '.azure-stage-*')) 'Payload rejection left extraction scratch'
 
   foreach($step in 'convert','resize','child','cpu','firmware','memory','dvd','start'){
     New-Case; $state.Fail=$step; Expect-Failure $step
     Assert-No-Instance
     Assert (-not $state.VM) "Rollback retained VM after $step"
-    Assert (-not(Test-Path (Join-Path $build 'fedora44-base-17179869184.vhdx.part.vhdx'))) 'Partial base survived failure'
+    Assert (-not(Test-Path (Join-Path $build 'fedora44-azure-base-17179869184.vhdx.part.vhdx'))) 'Partial base survived failure'
     $state.Fail=''; & $scriptPath @options
     Assert ($state.VM.State -eq 'Running') "Retry failed after $step"
   }
@@ -128,25 +132,26 @@ try {
   New-Case; $state.Fail='cpu'; $state.LookupFails=$true; Expect-Failure 'cpu'
   Assert ($state.VM -and (Test-Path (Join-Path $build 'test/disk.vhdx'))) 'Uncertain VM lookup deleted its disk'
 
-  # Cached raw replacement is staged and must retain the original on hash failure.
-  New-Case; $state.RawCorrupt=$true; $state.Fail='raw-hash'; Expect-Failure 'size/SHA-256'
-  $raw=Join-Path $cache 'Fedora-Cloud-Base-AmazonEC2-44-1.7.x86_64.raw'
-  $file=[IO.File]::OpenRead($raw); $bytes=New-Object byte[] 8
+  # Cached VHD replacement is staged and must retain the original on validation failure.
+  New-Case; $state.RawCorrupt=$true; $state.Fail='raw-hash'
+  Expect-Failure 'fixed VHD'
+  $fixed=Join-Path $cache 'Fedora-Cloud-Base-Azure-44-1.7.x86_64.vhd'
+  $file=[IO.File]::OpenRead($fixed); $bytes=New-Object byte[] 8
   try {$null=$file.Read($bytes,0,8)} finally {$file.Dispose()}
-  Assert ([Text.Encoding]::ASCII.GetString($bytes) -eq 'original') 'Failed staged extraction replaced cached raw'
-  Assert (-not(Get-ChildItem $cache -Filter '.raw-stage-*')) 'Extraction scratch survived failure'
-  $state.Fail=''; & $scriptPath @options
-  $file=[IO.File]::OpenRead($raw)
+  Assert ([Text.Encoding]::ASCII.GetString($bytes) -eq 'original') 'Failed staged extraction replaced cached VHD'
+  Assert (-not(Get-ChildItem $cache -Filter '.azure-stage-*')) 'Extraction scratch survived failure'
+  Remove-Item $fixed
+  $script:state.RawCorrupt=$false; $script:state.Fail=''; & $scriptPath @options
+  $file=[IO.File]::OpenRead($fixed)
   try {$null=$file.Read($bytes,0,8)} finally {$file.Dispose()}
-  Assert ([Text.Encoding]::ASCII.GetString($bytes) -eq 'candidat') 'Validated raw replacement was not published'
+  Assert (([Text.Encoding]::ASCII.GetString($bytes)) -eq 'candidat') "Validated VHD replacement was not published: $([Text.Encoding]::ASCII.GetString($bytes))"
 
   New-Case
-  $archive=Join-Path $cache 'Fedora-Cloud-Base-AmazonEC2-44-1.7.x86_64.raw.xz'
+  $archive=Join-Path $cache 'Fedora-Cloud-Base-Azure-44-1.7.x86_64.vhdfixed.xz'
   Remove-Item $archive
   $state.Fail='archive-hash'
-  Expect-Failure 'Compressed image'
+  Expect-Failure 'Compressed image SHA-256 mismatch'
   Assert (-not(Get-ChildItem $cache -Filter '.download-*')) 'Failed download scratch survived'
-  $state.Fail=''; & $scriptPath @options
   Assert ($state.Calls.Contains('download')) 'Download mock was not exercised'
   # Status and stop must dispatch without start-only validation or storage work.
   New-Case $false

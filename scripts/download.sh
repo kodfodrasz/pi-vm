@@ -4,47 +4,48 @@ source "$(dirname "$0")/common.sh"
 
 require_command curl
 require_command flock
+require_command qemu-img
 require_command sha256sum
-require_command xz
 
 mkdir -p "$CACHE_DIR"
 exec 9>"$CACHE_DIR/.download.lock"
 flock 9
 
-archive=$CACHE_DIR/Fedora-Cloud-Base-AmazonEC2-44-1.7.x86_64.raw.xz
-
-if raw_image_is_valid; then
-    echo "Validated image cache: $RAW"
-    exit 0
-fi
-
-rm -f -- "$RAW" "$RAW.part"
-archive_hash=$(sha256sum "$archive" 2>/dev/null | awk '{print $1}' || true)
-if [[ $archive_hash != "$IMAGE_SHA256" ]]; then
-    rm -f -- "$archive.part"
-    require_free_space "$CACHE_DIR" 1200000000
-    curl --fail --location --retry 3 "$IMAGE_URL" -o "$archive.part"
-
-    downloaded_hash=$(sha256sum "$archive.part" | awk '{print $1}')
-    if [[ $downloaded_hash != "$IMAGE_SHA256" ]]; then
-        rm -f -- "$archive.part"
-        echo 'Image SHA-256 mismatch' >&2
-        exit 1
-    fi
-    mv -f -- "$archive.part" "$archive"
-fi
-
-# The raw image expands to 5 GiB. Leave room for both files during publication.
-require_free_space "$CACHE_DIR" 6500000000
-xz --decompress --keep --stdout "$archive" > "$RAW.part"
-
-raw_size=$(stat -c %s "$RAW.part")
-raw_hash=$(sha256sum "$RAW.part" | awk '{print $1}')
-if [[ $raw_size != "$RAW_SIZE" || $raw_hash != "$RAW_SHA256" ]]; then
-    rm -f -- "$RAW.part"
-    echo 'Raw image size/SHA-256 mismatch' >&2
+if [[ -L $KVM_IMAGE ]]; then
+    echo "Refusing symlink image cache: $KVM_IMAGE" >&2
     exit 1
 fi
 
-mv -f -- "$RAW.part" "$RAW"
-echo "Downloaded and validated: $RAW"
+image_is_valid() {
+    [[ -f $KVM_IMAGE ]] || return 1
+    [[ $(stat -c %s "$KVM_IMAGE") == "$KVM_IMAGE_SIZE" ]] || return 1
+    [[ $(sha256sum "$KVM_IMAGE" | awk '{print $1}') == "$KVM_IMAGE_SHA256" ]] || return 1
+    qemu-img check -f qcow2 -- "$KVM_IMAGE" >/dev/null
+}
+
+if image_is_valid; then
+    echo "Validated image cache: $KVM_IMAGE"
+    exit 0
+fi
+
+# Never replace an image that may already be a backing file for an instance.
+if [[ -e $KVM_IMAGE ]]; then
+    echo "Invalid cached image; refusing to replace possible backing parent: $KVM_IMAGE" >&2
+    exit 1
+fi
+
+require_free_space "$CACHE_DIR" 1500000000
+stage=$(mktemp "$CACHE_DIR/.download-XXXXXX")
+cleanup() { rm -f -- "$stage"; }
+trap cleanup EXIT
+curl --fail --location --retry 3 "$KVM_IMAGE_URL" -o "$stage"
+
+if [[ $(stat -c %s "$stage") != "$KVM_IMAGE_SIZE" ]] ||
+   [[ $(sha256sum "$stage" | awk '{print $1}') != "$KVM_IMAGE_SHA256" ]]; then
+    echo 'Image size/SHA-256 mismatch' >&2
+    exit 1
+fi
+qemu-img check -f qcow2 -- "$stage" >/dev/null
+mv -- "$stage" "$KVM_IMAGE"
+trap - EXIT
+echo "Downloaded and validated: $KVM_IMAGE"

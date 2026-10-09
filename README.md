@@ -61,8 +61,9 @@ Defaults: 2 CPUs, 2048 MiB RAM, 16 GiB disk, and loopback SSH port 2222.
 Different running VMs need different SSH ports. Disks must be at least 5 GiB;
 8 GiB or more gives room for the software and root growth.
 
-The scripts download and check the Fedora raw image, convert it to a shared
-qcow2 base, and create a qcow2 overlay for each VM. A `cidata` ISO supplies
+The script downloads and validates Fedora Cloud Base Generic
+`Fedora-Cloud-Base-Generic-44-1.7.x86_64.qcow2` and uses that file directly as
+an immutable shared parent for qcow2 overlays. A `cidata` ISO supplies
 cloud-init. The root partition and filesystem grow to fill the guest disk.
 QEMU runs with KVM acceleration, the host CPU, and a virtio balloon device.
 The scripts do not change host networking or kernel settings.
@@ -149,7 +150,8 @@ Downloaded images stay in `~/.cache/pi-vm/images`. VM disks, ISOs, logs, and tes
 scratch files stay in `build/`, **not `/tmp`**. Set `PI_VM_CACHE` and `PI_VM_BUILD`
 to absolute paths on a larger disk if needed. Keep at least 10 GiB free for a
 Linux download and a small guest. Sparse disks can grow, so watch host free space.
-The VHD conversion test needs about 11 GiB of free disk space.
+Hyper-V image preparation needs at least 12 GiB free for the image cache and
+20 GiB free for the build volume (32 GiB when both paths share a volume).
 
 Do not edit, move, or delete a shared base while any child disk depends on it.
 The scripts never boot the base itself. To build only a seed ISO:
@@ -165,8 +167,8 @@ Run PowerShell as Administrator. You need the Hyper-V feature and module,
 Python available as `python`, and 7-Zip available as `7z.exe`. The scripts use
 APIs available in Windows PowerShell 5.1; PowerShell 7 can also run them.
 They check the storage volume that holds each path, including mounted volumes.
-Keep at least 8 GiB free for the cache and 12 GiB for the build files. If both
-paths share a volume, at least 20 GiB must be free there. This is a conservative
+Keep at least 12 GiB free for the cache and 20 GiB for the build files. If both
+paths share a volume, at least 32 GiB must be free there. This is a conservative
 check for new VM creation; restarting an existing VM needs no conversion space.
 Use local disk storage, not a temporary or cloud-sync folder.
 
@@ -176,10 +178,11 @@ Use local disk storage, not a temporary or cloud-sync folder.
 .\scripts\hyperv.ps1 -Action stop -Id pipette
 ```
 
-The script downloads and checks the same raw image. It writes a fixed VHD,
-uses native `Convert-VHD` to make a VHDX base, grows that base, and creates a
-**differencing VHDX** for each VM. A separate immutable base is used for each
-disk size. No Windows `qemu-img` is needed.
+The script downloads and checks Fedora Cloud Base Azure
+`Fedora-Cloud-Base-Azure-44-1.7.x86_64.vhdfixed.xz`, decompresses the native
+fixed VHD, and uses native `Convert-VHD` to make a VHDX parent. It then creates
+a **differencing VHDX** for each VM. A separate immutable parent is used for
+each disk size. No Windows `qemu-img` is needed.
 
 Without `-SeedIso`, `seed.ps1` uses Python and Windows IMAPI2FS to build a real
 `cidata` ISO with `user-data` and `meta-data`. The ISO stays at
@@ -249,9 +252,8 @@ self-contained unattended ISO cannot also conceal its own secret.
 ## Checks and repeatability
 
 `make test` runs offline checks for shell, Python, rendered seeds, KVM process
-handling, PowerShell, and VHD conversion. It does not download an image or boot
-a VM. PowerShell and VHD checks run only when their host tools are available;
-the large VHD case also requires enough free disk space.
+handling, and PowerShell Hyper-V orchestration. It does not download an image or boot
+a VM. PowerShell checks run only when PowerShell is available.
 
 ### Check a running KVM guest
 
@@ -290,11 +292,13 @@ hostname is `pipette`, not the instance ID; `--hostname` changes that check.
 `tests/nested-kvm.py` runs a tiny L2 guest inside a test VM. It needs root and
 the stock KVM kernel module, not a QEMU package.
 
-The source is Fedora Cloud Base AmazonEC2 **44-1.7** from Fedora's release mirrors.
-This raw image was tested with NoCloud on KVM in BIOS and UEFI modes. Both the
-compressed and expanded raw images have pinned SHA-256 hashes. See
-`scripts/common.sh` for the URL and hashes. Hash checks detect changed content;
-they do not verify Fedora's signing key.
+The platform sources are Fedora Cloud Base Generic
+`Fedora-Cloud-Base-Generic-44-1.7.x86_64.qcow2` for KVM and Fedora Cloud Base
+Azure `Fedora-Cloud-Base-Azure-44-1.7.x86_64.vhdfixed.xz` for Hyper-V. Both are
+from Fedora's release mirror and are pinned by SHA-256 values published in
+`Fedora-Cloud-44-1.7-x86_64-CHECKSUM`; see `scripts/common.sh` and
+`scripts/hyperv.ps1`. Hash checks detect changed content; they do not verify
+Fedora's signing key.
 
 The image and top-level Pi/Starship versions are pinned. Fedora packages and npm
 transitive dependencies can change over time. This is a repeatable bootstrap,

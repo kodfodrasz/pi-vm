@@ -84,7 +84,7 @@ initialize_instance() {
     instance_dir=$BUILD_DIR/$instance_id
     pid_file=$instance_dir/qemu.pid
     qmp_socket=$instance_dir/qmp.sock
-    base_image=$BUILD_DIR/fedora44-base.qcow2
+    base_image=$KVM_IMAGE
     if [[ -L $instance_dir ]]; then
         echo 'Refuse symlink instance directory' >&2
         exit 1
@@ -106,13 +106,13 @@ prepare_instance_storage() {
     fi
     mkdir -p "$instance_dir"
 
-    if [[ ! -e $base_image ]]; then
-        qemu-img convert -p -f raw -O qcow2 -o compat=1.1 "$RAW" "$base_image.tmp"
-        qemu-img check "$base_image.tmp"
-        mv "$base_image.tmp" "$base_image"
+    if [[ ! -f $base_image ]]; then
+        echo "Validated KVM parent is missing: $base_image" >&2
+        exit 1
     fi
 
     if [[ ! -f $instance_dir/disk.qcow2 ]]; then
+        rm -f -- "$instance_dir/disk.qcow2.part"
         require_free_space "$BUILD_DIR" 2000000000
         if [[ ! -f $instance_dir/seed.iso ]]; then
             "$PI_VM_ROOT/scripts/seed.sh" "$instance_id" pipette \

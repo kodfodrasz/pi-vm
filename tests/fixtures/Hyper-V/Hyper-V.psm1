@@ -24,13 +24,17 @@ function Get-Volume {
 function Get-FileHash {
   [CmdletBinding()]param($Path,$Algorithm)
   Add-Call ('hash:'+([IO.Path]::GetFileName($Path)))
-  if($Path.EndsWith('.raw')){
-    $hash='ccf0412fa9e3f7d8ce8824e03e3c7369d0fef6dffb00a786a6bc9e895ccdb9ce'
-    if(($script:state.RawCorrupt -and $Path -notmatch '\.raw-stage-') -or ($script:state.Fail -eq 'raw-hash' -and $Path -match '\.raw-stage-')){$hash='bad'}
-  } else {
-    $hash='7e4fb73907abdc761d226ddaf3263bdfca62a0b0bfb5f0798545a9981fdd1953'
+  $hash='dd0c36585f1da3d19866804600e272428a381af9cc83b7fe6a1d4f9e72770835'
+  if($Path -match '\.xz$') {
+    $hash='daa212a316a94d7a4584a704cad89dfd0bac45e70ee83c4212c095b3b8d55ce5'
     if($script:state.Fail -eq 'archive-hash'){$hash='bad'}
+  } elseif(($script:state.RawCorrupt -or $script:state.Fail -eq 'raw-hash') -and
+           $Path -match '\.azure-stage-') {
+    $hash='bad'
+  } elseif($script:state.PayloadCorrupt) {
+    $hash='bad'
   }
+  if($script:state.Fail -eq 'archive-hash'){$hash='bad'}
   [pscustomobject]@{Hash=$hash}
 }
 function Invoke-WebRequest {
@@ -41,18 +45,26 @@ function Invoke-WebRequest {
 function 7z {
   Add-Call 'extract'; Fail-At 'extract'
   $output=($args | Where-Object {$_ -like '-o*'} | Select-Object -First 1).Substring(2)
-  $path=Join-Path $output 'Fedora-Cloud-Base-AmazonEC2-44-1.7.x86_64.raw'
+  $path=Join-Path $output 'Fedora-Cloud-Base-Azure-44-1.7.x86_64.vhdfixed'
   $file=[IO.File]::Open($path,[IO.FileMode]::Create)
-  try {$bytes=[Text.Encoding]::ASCII.GetBytes('candidate');$file.Write($bytes,0,$bytes.Length);$file.SetLength(5368709120L)} finally {$file.Dispose()}
+  try {$bytes=[Text.Encoding]::ASCII.GetBytes('candidate');$file.Write($bytes,0,$bytes.Length);$file.SetLength(5368709632L)} finally {$file.Dispose()}
   $global:LASTEXITCODE=0
 }
 function Get-VHD {
   [CmdletBinding()]param($Path)
-  [pscustomobject]@{Size=$script:state.BaseSize;ParentPath=$null}
+  if(-not ($Path.EndsWith('.vhd') -or $Path.EndsWith('.vhdx'))){throw 'Unsupported native VHD suffix'}
+  if($Path.EndsWith('.vhd')) {
+    $type='Fixed'
+    if($script:state.RawCorrupt -or $script:state.Fail -eq 'raw-hash'){$type='Dynamic'}
+    [pscustomobject]@{Size=5GB;VhdFormat='VHD';VhdType=$type;ParentPath=$null}
+  } else {
+    [pscustomobject]@{Size=$script:state.BaseSize;VhdType='Dynamic';ParentPath=$null}
+  }
 }
 function Convert-VHD {
   [CmdletBinding()]param($Path,$DestinationPath,$VHDType)
   Add-Call 'convert'
+  if(-not $Path.EndsWith('.vhd')){throw 'Wrong Azure source suffix'}
   if(-not $DestinationPath.EndsWith('.vhdx')){throw 'Wrong conversion suffix'}
   [IO.File]::WriteAllText($DestinationPath,'mock converted base')
   Fail-At 'convert'

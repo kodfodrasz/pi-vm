@@ -98,8 +98,10 @@ function Get-StorageVolume($Path) {
 function Assert-StorageCapacity($Settings) {
     $required = @{}
     foreach ($item in @(
-        @{ Path = $Settings.CacheDirectory; Bytes = 8GB }
-        @{ Path = $Settings.BuildDirectory; Bytes = 12GB }
+        # The Azure archive expands to a fixed 5 GiB VHD plus its 512-byte footer while staged.
+        @{ Path = $Settings.CacheDirectory; Bytes = 12GB }
+        # Leave room for the converted parent and a new differencing disk.
+        @{ Path = $Settings.BuildDirectory; Bytes = 20GB }
     )) {
         $volume = Get-StorageVolume $item.Path
         $volumeId = [string]$volume.UniqueId
@@ -134,13 +136,34 @@ function Test-FileHash($Path, $ExpectedHash) {
         (Get-FileHash $Path -Algorithm SHA256).Hash.ToLowerInvariant() -eq $ExpectedHash
 }
 
-function Get-VerifiedRawImage($Settings) {
-    $archive = Join-Path $Settings.CacheDirectory 'Fedora-Cloud-Base-AmazonEC2-44-1.7.x86_64.raw.xz'
-    $raw = Join-Path $Settings.CacheDirectory 'Fedora-Cloud-Base-AmazonEC2-44-1.7.x86_64.raw'
-    $url = 'https://download.fedoraproject.org/pub/fedora/linux/releases/44/Cloud/x86_64/images/Fedora-Cloud-Base-AmazonEC2-44-1.7.x86_64.raw.xz'
-    $archiveHash = '7e4fb73907abdc761d226ddaf3263bdfca62a0b0bfb5f0798545a9981fdd1953'
-    $rawHash = 'ccf0412fa9e3f7d8ce8824e03e3c7369d0fef6dffb00a786a6bc9e895ccdb9ce'
-    $rawSize = 5368709120L
+$azureFixedLength = 5368709632L
+$azureVirtualSize = 5368709120L
+$azureFixedSha256 = 'dd0c36585f1da3d19866804600e272428a381af9cc83b7fe6a1d4f9e72770835'
+
+function Test-FixedVhd($Path) {
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf) -or
+        (Get-Item -LiteralPath $Path).Length -ne $azureFixedLength -or
+        -not (Test-FileHash $Path $azureFixedSha256)) {
+        return $false
+    }
+    try {
+        $disk = Get-VHD -Path $Path
+        return $disk.VhdFormat -eq 'VHD' -and
+            $disk.VhdType -eq 'Fixed' -and
+            [string]::IsNullOrEmpty([string]$disk.ParentPath) -and
+            $disk.Size -eq $azureVirtualSize
+    } catch {
+        return $false
+    }
+}
+
+function Get-VerifiedAzureImage($Settings) {
+    $archive = Join-Path $Settings.CacheDirectory 'Fedora-Cloud-Base-Azure-44-1.7.x86_64.vhdfixed.xz'
+    # Keep the archive's .vhdfixed name, but use .vhd for native Hyper-V tools.
+    $fixed = Join-Path $Settings.CacheDirectory 'Fedora-Cloud-Base-Azure-44-1.7.x86_64.vhd'
+    $url = 'https://download.fedoraproject.org/pub/fedora/linux/releases/44/Cloud/x86_64/images/Fedora-Cloud-Base-Azure-44-1.7.x86_64.vhdfixed.xz'
+    # Fedora-Cloud-44-1.7-x86_64-CHECKSUM, retrieved from Fedora's release mirror.
+    $archiveHash = 'daa212a316a94d7a4584a704cad89dfd0bac45e70ee83c4212c095b3b8d55ce5'
 
     $lockPath = Join-Path $Settings.CacheDirectory '.download.lock'
     $cacheLock = [IO.File]::Open($lockPath, [IO.FileMode]::OpenOrCreate,
@@ -159,12 +182,8 @@ function Get-VerifiedRawImage($Settings) {
             }
         }
 
-        $rawIsValid = (Test-Path $raw) -and (Get-Item $raw).Length -eq $rawSize
-        if ($rawIsValid) {
-            $rawIsValid = Test-FileHash $raw $rawHash
-        }
-        if (-not $rawIsValid) {
-            $stage = Join-Path $Settings.CacheDirectory ('.raw-stage-' + [Guid]::NewGuid().ToString('N'))
+        if (-not (Test-FixedVhd $fixed)) {
+            $stage = Join-Path $Settings.CacheDirectory ('.azure-stage-' + [Guid]::NewGuid().ToString('N'))
             New-Item -ItemType Directory -Path $stage | Out-Null
             try {
                 if (-not (Get-Command 7z -ErrorAction SilentlyContinue)) {
@@ -174,14 +193,19 @@ function Get-VerifiedRawImage($Settings) {
                 if ($LASTEXITCODE) {
                     throw '7-Zip decompression failed'
                 }
-                $candidate = Join-Path $stage (Split-Path $raw -Leaf)
-                $candidateIsValid = (Test-Path $candidate) -and
-                    (Get-Item $candidate).Length -eq $rawSize -and
-                    (Test-FileHash $candidate $rawHash)
-                if (-not $candidateIsValid) {
-                    throw 'Raw image size/SHA-256 mismatch'
+                $candidate = Join-Path $stage (Split-Path $fixed -Leaf)
+                $archiveImageName = [IO.Path]::GetFileNameWithoutExtension((Split-Path $archive -Leaf))
+                $extracted = Join-Path $stage $archiveImageName
+                if (-not (Test-Path -LiteralPath $extracted -PathType Leaf)) {
+                    $extracted = $candidate
                 }
-                Move-FileIntoPlace $candidate $raw
+                if ($extracted -ne $candidate) {
+                    [IO.File]::Move($extracted, $candidate)
+                }
+                if (-not (Test-FixedVhd $candidate)) {
+                    throw 'Decompressed Azure image is not a fixed VHD'
+                }
+                Move-FileIntoPlace $candidate $fixed
             } finally {
                 Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue
             }
@@ -189,28 +213,37 @@ function Get-VerifiedRawImage($Settings) {
     } finally {
         $cacheLock.Dispose()
     }
-    $raw
+    $fixed
 }
 
-function Get-OrCreateBaseDisk($Settings, $Creation, $RawPath) {
-    $base = Join-Path $Settings.BuildDirectory "fedora44-base-$($Settings.DiskBytes).vhdx"
+function Publish-NewFile($Source, $Destination) {
+    if (Test-Path -LiteralPath $Destination) {
+        throw "Refusing to replace existing parent: $Destination"
+    }
+    [IO.File]::Move($Source, $Destination)
+}
+
+function Get-OrCreateBaseDisk($Settings, $Creation, $FixedPath) {
+    if ($Settings.DiskBytes -lt $azureVirtualSize) {
+        throw 'Disk size is smaller than the Azure source virtual size'
+    }
+    $base = Join-Path $Settings.BuildDirectory "fedora44-azure-base-$($Settings.DiskBytes).vhdx"
     if (Test-Path $base) {
         $disk = Get-VHD -Path $base
         if ($disk.Size -ne $Settings.DiskBytes -or $disk.ParentPath) {
-            throw 'Cached base has unexpected size or parent'
+            throw 'Cached Azure base has unexpected size or parent'
         }
         return $base
     }
 
-    $fixed = Join-Path $Settings.BuildDirectory "fedora44-base-$($Settings.DiskBytes).vhd"
-    if (-not (Test-Path $fixed)) {
-        & "$PSScriptRoot/raw-to-vhd.ps1" -RawPath $RawPath -VhdPath $fixed
-    }
     $Creation.PartialBase = "$base.part.vhdx"
     Remove-Item -LiteralPath $Creation.PartialBase -Force -ErrorAction SilentlyContinue
-    Convert-VHD -Path $fixed -DestinationPath $Creation.PartialBase -VHDType Dynamic
-    Resize-VHD -Path $Creation.PartialBase -SizeBytes $Settings.DiskBytes
-    [IO.File]::Move($Creation.PartialBase, $base)
+    Convert-VHD -Path $FixedPath -DestinationPath $Creation.PartialBase -VHDType Dynamic
+    if ($Settings.DiskBytes -gt $azureVirtualSize) {
+        Resize-VHD -Path $Creation.PartialBase -SizeBytes $Settings.DiskBytes
+    }
+    Publish-NewFile $Creation.PartialBase $base
+    $Creation.PartialBase = $null
     $base
 }
 
@@ -306,8 +339,8 @@ function New-PiVm($Settings) {
         New-Item -ItemType Directory -Path $Settings.InstanceDirectory | Out-Null
         $creation.OwnedInstance = $true
 
-        $rawPath = Get-VerifiedRawImage $Settings
-        $basePath = Get-OrCreateBaseDisk $Settings $creation $rawPath
+        $fixedPath = Get-VerifiedAzureImage $Settings
+        $basePath = Get-OrCreateBaseDisk $Settings $creation $fixedPath
         $childPath = Join-Path $Settings.InstanceDirectory 'disk.vhdx'
         New-VHD -Path $childPath -ParentPath $basePath -Differencing | Out-Null
 

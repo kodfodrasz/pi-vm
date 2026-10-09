@@ -15,5 +15,4 @@ grep -q 'host-test-unique' "$tmp/seed/meta-data"
 grep -q '__WRITE_FILES__' "$tmp/seed/user-data" && exit 1 || true
 if command -v shellcheck >/dev/null; then shellcheck -x -S warning -e SC1091,SC2015 "$root"/scripts/*.sh; fi
 if command -v pwsh >/dev/null; then pwsh -NoProfile -File "$root/tests/powershell.ps1"; pwsh -NoProfile -File "$root/tests/hyperv.ps1"; fi
-if command -v pwsh >/dev/null && command -v qemu-img >/dev/null; then python3 "$root/tests/footer.py"; fi
 echo 'host checks passed'

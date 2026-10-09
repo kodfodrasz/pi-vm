@@ -4,13 +4,13 @@ set -Eeuo pipefail
 PI_VM_ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 CACHE_DIR=${PI_VM_CACHE:-${HOME}/.cache/pi-vm/images}
 BUILD_DIR=${PI_VM_BUILD:-${PI_VM_ROOT}/build}
-RAW=${CACHE_DIR}/Fedora-Cloud-Base-AmazonEC2-44-1.7.x86_64.raw
+KVM_IMAGE=${CACHE_DIR}/Fedora-Cloud-Base-Generic-44-1.7.x86_64.qcow2
 
-export PI_VM_ROOT CACHE_DIR BUILD_DIR RAW
-export IMAGE_URL=https://download.fedoraproject.org/pub/fedora/linux/releases/44/Cloud/x86_64/images/Fedora-Cloud-Base-AmazonEC2-44-1.7.x86_64.raw.xz
-export IMAGE_SHA256=7e4fb73907abdc761d226ddaf3263bdfca62a0b0bfb5f0798545a9981fdd1953
-export RAW_SHA256=ccf0412fa9e3f7d8ce8824e03e3c7369d0fef6dffb00a786a6bc9e895ccdb9ce
-export RAW_SIZE=5368709120
+export PI_VM_ROOT CACHE_DIR BUILD_DIR KVM_IMAGE
+export KVM_IMAGE_URL=https://download.fedoraproject.org/pub/fedora/linux/releases/44/Cloud/x86_64/images/Fedora-Cloud-Base-Generic-44-1.7.x86_64.qcow2
+# Fedora-Cloud-44-1.7-x86_64-CHECKSUM, retrieved from Fedora's release mirror.
+export KVM_IMAGE_SHA256=28680fe5b371a5a82ebf43a31926e086a168e59949d03969c5093e7071f90b7f
+export KVM_IMAGE_SIZE=583729152
 
 # VM images may contain credentials added after installation.
 umask 077
@@ -33,10 +33,4 @@ require_free_space() {
         echo "Insufficient disk space at $path" >&2
         exit 1
     fi
-}
-
-raw_image_is_valid() {
-    [[ -f $RAW ]] || return 1
-    [[ $(stat -c %s "$RAW") == "$RAW_SIZE" ]] || return 1
-    [[ $(sha256sum "$RAW" | awk '{print $1}') == "$RAW_SHA256" ]]
 }

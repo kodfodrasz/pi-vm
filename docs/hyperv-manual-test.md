@@ -12,8 +12,9 @@ Use a new test ID. Do not point it at a disk from another VM.
 .\scripts\hyperv.ps1 -Action start -Id win-check -CpuCount 1 -MemoryMB 1024 -DiskSize 8GiB
 ```
 
-Expected: the script checks free space, downloads and verifies Fedora if needed,
-creates a NoCloud ISO, makes an 8 GiB VHDX base, and creates a child disk.
+Expected: the script checks free space, downloads and verifies the Fedora Azure
+fixed VHD if needed, creates a NoCloud ISO, converts it to an 8 GiB VHDX parent,
+and creates a child disk.
 A later VM of the same size should reuse that base without resizing it.
 
 ## 2. Check the host settings
