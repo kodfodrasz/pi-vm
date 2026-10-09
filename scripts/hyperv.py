@@ -7,11 +7,11 @@
 # ///
 """Bounded native Hyper-V feasibility tool.
 
-This file deliberately does not invoke PowerShell.  It verifies and stages the
-Fedora Azure source with Python, and can inspect or control a VM only when the
-instance's creation marker proves that this checkout owns it.  New Generation
-2 VM creation is refused: the documented WMI DefineSystem/resource-setting
-sequence still needs a Windows validation run before it is safe to implement.
+This file deliberately does not invoke PowerShell. It verifies and stages the
+Fedora Azure source with Python and provides read-only status for an owned VM.
+Lifecycle mutation and new Generation 2 VM creation are refused: the
+documented WMI DefineSystem/resource-setting and shutdown sequences still need
+a Windows validation run before they are safe to implement.
 """
 from __future__ import annotations
 

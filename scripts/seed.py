@@ -156,8 +156,10 @@ def publish_iso(instance_id: str, hostname: str, output: Path) -> Path:
         build_iso(files, partial)
         if not partial.is_file() or partial.stat().st_size == 0:
             raise RuntimeError("ISO builder produced no image")
-        # A hard-link publication is atomic and fails if another publisher won
-        # the destination race. It also works on NTFS without replacement.
+        # Restrict the staged inode before it becomes visible at its final
+        # name. Hard-link publication is atomic and refuses a race-created
+        # destination on NTFS and POSIX filesystems.
+        os.chmod(partial, 0o600)
         os.link(partial, output)
         os.chmod(output, 0o600)
     return output

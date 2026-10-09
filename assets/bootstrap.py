@@ -32,10 +32,25 @@ def retry_script_bytes(content: bytes) -> bytes:
 
 
 def set_tree_owner(root: Path, user: str, group: str, owner=shutil.chown) -> None:
-    if not root.exists():
+    if not root.exists() and not root.is_symlink():
         return
-    for path in (root, *root.rglob("*")):
+    if root.is_symlink():
+        raise RuntimeError(f"refusing symlink ownership root: {root}")
+    pending = [root]
+    while pending:
+        path = pending.pop()
         owner(path, user=user, group=group)
+        if not path.is_dir():
+            continue
+        with os.scandir(path) as entries:
+            for entry in entries:
+                child = Path(entry.path)
+                if entry.is_symlink():
+                    raise RuntimeError(f"refusing symlink in ownership tree: {child}")
+                if entry.is_dir(follow_symlinks=False):
+                    pending.append(child)
+                else:
+                    owner(child, user=user, group=group)
 
 
 def atomic_bytes(path: Path, content: bytes, mode: int = 0o644) -> None:

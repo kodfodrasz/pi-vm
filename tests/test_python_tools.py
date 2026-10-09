@@ -5,6 +5,7 @@
 """Offline checks for the Python-only prototype."""
 from __future__ import annotations
 
+import argparse
 import base64
 import importlib.util
 import hashlib
@@ -86,8 +87,16 @@ class SeedTests(unittest.TestCase):
             for path in text_files:
                 text = path.read_text(encoding="utf-8-sig").replace("\n", "\r\n")
                 path.write_bytes(b"\xef\xbb\xbf" + text.encode())
+            fixture_local = root / "local"
+            fixture_local.mkdir()
+            (fixture_local / "opaque.bin").write_bytes(b"\xfffixture\r\nbytes")
             expected = root / "expected"
-            seed.render_seed("windows-test", "pipette", expected)
+            old_local = seed.LOCAL
+            try:
+                seed.LOCAL = fixture_local
+                seed.render_seed("windows-test", "pipette", expected)
+            finally:
+                seed.LOCAL = old_local
             actual = root / "actual"
             subprocess.run([sys.executable, str(renderer / "seed.py"), "windows-test",
                             "--hostname", "pipette", "--render-only", str(actual)], check=True)
@@ -109,6 +118,22 @@ class BootstrapTests(unittest.TestCase):
             bootstrap.set_tree_owner(root, "pi", "pi", owner=lambda path, **kwargs: calls.append((path, kwargs)))
             self.assertEqual({path for path, _ in calls}, {root, root / "nested", root / "nested/file"})
             self.assertTrue(all(kwargs == {"user": "pi", "group": "pi"} for _, kwargs in calls))
+
+    def test_directory_tree_owner_rejects_root_and_external_target_symlinks(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "tree"
+            root.mkdir()
+            external = Path(directory) / "external"
+            external.write_bytes(b"outside")
+            (root / "link").symlink_to(external)
+            calls = []
+            with self.assertRaises(RuntimeError):
+                bootstrap.set_tree_owner(root, "pi", "pi", owner=lambda path, **kwargs: calls.append(path))
+            self.assertNotIn(external, calls)
+            root_link = Path(directory) / "root-link"
+            root_link.symlink_to(root, target_is_directory=True)
+            with self.assertRaises(RuntimeError):
+                bootstrap.set_tree_owner(root_link, "pi", "pi", owner=lambda path, **kwargs: None)
 
 
 class SeedPublicationTests(unittest.TestCase):
@@ -153,14 +178,21 @@ class SeedPublicationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory) / "seed.iso"
             old_builder = seed.build_iso
+            old_link = seed.os.link
+            observed_modes = []
             try:
                 seed.build_iso = lambda files, partial: partial.write_bytes(b"iso")
+                def checking_link(source, destination):
+                    observed_modes.append(Path(source).stat().st_mode & 0o777)
+                    return old_link(source, destination)
+                seed.os.link = checking_link
                 old_umask = os.umask(0o022)
                 try:
                     seed.publish_iso("private", "pipette", output)
                 finally:
                     os.umask(old_umask)
                 self.assertEqual(output.stat().st_mode & 0o777, 0o600)
+                self.assertEqual(observed_modes, [0o600])
                 output.unlink()
                 def racing_builder(files, partial):
                     partial.write_bytes(b"new")
@@ -171,6 +203,7 @@ class SeedPublicationTests(unittest.TestCase):
                 self.assertEqual(output.read_bytes(), b"old")
             finally:
                 seed.build_iso = old_builder
+                seed.os.link = old_link
 
 
 class SafetyTests(unittest.TestCase):
@@ -193,6 +226,45 @@ class SafetyTests(unittest.TestCase):
                 self.assertEqual(kvm.main(["download", "--cache", directory]), 0)
             finally:
                 kvm.download_image = old_download
+
+    def test_start_constructs_normalized_launch_argv_without_real_qemu(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            build = root / "build"
+            instance = build / "launch-test"
+            instance.mkdir(parents=True)
+            (instance / "disk.qcow2").write_bytes(b"disk")
+            (instance / "seed.iso").write_bytes(b"seed")
+            args = argparse.Namespace(action="start", instance="launch-test", memory=2048,
+                                      cpus=2, disk="16G", ssh_port=2222,
+                                      cache=str(root / "cache"), build=str(build), force=False)
+            calls = []
+            old_prerequisites = kvm.require_host_prerequisites
+            old_download = kvm.download_image
+            old_status = kvm.process_status
+            old_run = kvm.subprocess.run
+            try:
+                kvm.require_host_prerequisites = lambda: None
+                kvm.download_image = lambda cache: root / "base.qcow2"
+                kvm.process_status = lambda pid, disk: False
+                def fake_run(argv, **kwargs):
+                    calls.append((argv, kwargs))
+                    pid_index = argv.index("-pidfile") + 1
+                    Path(argv[pid_index]).write_text("1234\\n")
+                    return subprocess.CompletedProcess(argv, 0)
+                kvm.subprocess.run = fake_run
+                kvm.start(args)
+            finally:
+                kvm.require_host_prerequisites = old_prerequisites
+                kvm.download_image = old_download
+                kvm.process_status = old_status
+                kvm.subprocess.run = old_run
+            self.assertEqual(len(calls), 1)
+            argv = calls[0][0]
+            self.assertEqual(argv[argv.index("-smp") + 1], "2")
+            self.assertEqual(argv[argv.index("-m") + 1], "2048")
+            self.assertTrue(any("hostfwd=tcp:127.0.0.1:2222-:22" in value for value in argv))
+            self.assertNotEqual(argv[0], sys.executable)
 
     def test_resource_contract(self):
         self.assertEqual(kvm.valid_resources("0000512", "0001", "0005120M", "02222"),
@@ -261,6 +333,12 @@ class EntrypointTests(unittest.TestCase):
         for path in (ROOT / "scripts/seed.py", ROOT / "scripts/kvm.py", ROOT / "scripts/hyperv.py", ROOT / "scripts/validate.py", ROOT / "assets/bootstrap.py"):
             result = subprocess.run([sys.executable, str(path), "--help"], text=True, capture_output=True)
             self.assertEqual(result.returncode, 0, (path, result.stderr))
+
+    def test_hyperv_cli_help_describes_read_only_scope(self):
+        result = subprocess.run([sys.executable, str(ROOT / "scripts/hyperv.py"), "--help"],
+                                text=True, capture_output=True, check=True)
+        self.assertIn("read-only status", result.stdout)
+        self.assertNotIn("inspect or control", result.stdout)
 
     def test_hyperv_mutation_is_explicitly_disabled(self):
         settings = type("Settings", (), {"action": "stop"})()

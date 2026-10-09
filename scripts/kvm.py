@@ -196,27 +196,32 @@ def operation_lock(build: Path):
         yield
 
 
-def build_instance(args: argparse.Namespace) -> tuple[Path, Path, Path]:
+def build_instance(args: argparse.Namespace) -> tuple[Path, Path, Path, int, int, str, int]:
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,100}", args.instance):
         raise ValueError("invalid instance id")
     memory, cpus, disk, port = valid_resources(str(args.memory), str(args.cpus), args.disk, str(args.ssh_port))
     build = Path(args.build).resolve()
-    return build / args.instance, build / args.instance / "qemu.pid", build / args.instance / "disk.qcow2"
+    return (build / args.instance, build / args.instance / "qemu.pid", build / args.instance / "disk.qcow2",
+            memory, cpus, disk, port)
+
+
+def require_host_prerequisites() -> None:
+    for command in ("qemu-img", QEMU, "xorriso"):
+        if shutil.which(command) is None:
+            raise RuntimeError(f"required command not found: {command}")
+    kvm = Path("/dev/kvm")
+    if os.name != "nt" and not (kvm.is_char_device() and os.access(kvm, os.R_OK | os.W_OK)):
+        raise RuntimeError("/dev/kvm unavailable; check host KVM and permissions")
+    if os.name != "nt" and not any(flag in Path("/proc/cpuinfo").read_text(errors="ignore") for flag in ("vmx", "svm")):
+        raise RuntimeError("CPU virtualization extensions are not exposed")
 
 
 def start(args: argparse.Namespace) -> None:
-    instance, pid_file, disk = build_instance(args)
+    instance, pid_file, disk, memory, cpus, disk_size, port = build_instance(args)
     with restrictive_umask(), operation_lock(Path(args.build).resolve()):
         if process_status(pid_file, disk):
             raise RuntimeError(f"instance already active: {args.instance}")
-        for command in ("qemu-img", QEMU, "xorriso"):
-            if shutil.which(command) is None:
-                raise RuntimeError(f"required command not found: {command}")
-        kvm = Path("/dev/kvm")
-        if os.name != "nt" and not (kvm.is_char_device() and os.access(kvm, os.R_OK | os.W_OK)):
-            raise RuntimeError("/dev/kvm unavailable; check host KVM and permissions")
-        if os.name != "nt" and not any(flag in Path("/proc/cpuinfo").read_text(errors="ignore") for flag in ("vmx", "svm")):
-            raise RuntimeError("CPU virtualization extensions are not exposed")
+        require_host_prerequisites()
         base = download_image(Path(args.cache))
         if args.force and instance.exists():
             if instance.is_symlink():
@@ -234,7 +239,7 @@ def start(args: argparse.Namespace) -> None:
                 run([sys.executable, str(ROOT / "scripts/seed.py"), args.instance, "--output", str(seed)])
             partial = instance / "disk.qcow2.part"
             partial.unlink(missing_ok=True)
-            run(["qemu-img", "create", "-f", "qcow2", "-F", "qcow2", "-b", str(base), str(partial), args.disk])
+            run(["qemu-img", "create", "-f", "qcow2", "-F", "qcow2", "-b", str(base), str(partial), disk_size])
             os.link(partial, disk)
             partial.unlink()
             os.chmod(disk, 0o600)
@@ -258,7 +263,7 @@ def start(args: argparse.Namespace) -> None:
 
 
 def stop_or_status(args: argparse.Namespace) -> int:
-    instance, pid_file, disk = build_instance(args)
+    instance, pid_file, disk, *_ = build_instance(args)
     if not process_status(pid_file, disk):
         if args.action == "status":
             print(f"{args.instance} stopped")
