@@ -30,6 +30,7 @@ The host exposes AMD-V and `/dev/kvm`; the host KVM nested setting is on.
 | Real wrong-port validation against a second VM | Correctly rejected by instance ID |
 | Validator negative checks and balloon restoration unit tests | Pass, 20 tests |
 | KVM process identity, PID handles, and input guards | Pass, 17 offline tests |
+| Structured launchers: real KVM start, validation, graceful stop | Pass on `final-smoke` |
 | Below-source KVM disk size rejected before instance creation | Pass |
 | Seed ISO label and root files | Pass, `CIDATA`, `user-data`, `meta-data` |
 | UTF-8 BOM / CRLF source normalization | Pass, identical Linux seed output |
@@ -137,6 +138,27 @@ checks remain open. The deployed KVM VM stayed running during this pass.
 Further guest checks passed: a real rootless Alpine container and another
 balloon resize, from 2 GiB to 1.75 GiB, followed by restoration to 2 GiB.
 Logs are `build/hyperv-mock.log` and `~/.cache/pi-vm/host/hardening-guest.log`.
+
+## Launcher readability refactor
+
+Both launchers now use named functions with short orchestration flows. The
+Bash start flow separates preflight, image verification, disk preparation, and
+QEMU launch. QEMU arguments are one option per line. The PowerShell flow uses
+explicit settings and creation-state objects; cache checks, base conversion,
+VM setup, and rollback are separate functions. No generic framework was added.
+
+All existing tests passed. Two added Windows mock cases verify that status and
+stop do not run start-only validation or create storage, bringing that suite
+to 27 cases. The public `-Switch` parameter is unchanged; dispatch uses simple
+ifs to avoid PowerShell's automatic `$switch` variable.
+
+The refactored Bash launcher started the existing stopped `final-smoke` test
+VM with 1 CPU, 1024 MiB RAM, and an 8 GiB disk. Runtime validation passed through
+SSH port 2223, then graceful QMP shutdown was requested and the VM stopped.
+The virtio NIC now explicitly names the `net0` backend. `pipette` was untouched.
+The final bounded Terra recheck returned **OK**, with no issues found.
+Logs are `build/structured-host-tests.log` and `build/structured-live.log`;
+the guest report is `build/final-smoke/structured-validation.json`.
 
 ## KVM process safety
 

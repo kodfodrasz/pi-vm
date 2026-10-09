@@ -105,6 +105,24 @@ try {
   Assert (-not(Get-ChildItem $cache -Filter '.download-*')) 'Failed download scratch survived'
   $state.Fail=''; & $scriptPath @options
   Assert ($state.Calls.Contains('download')) 'Download mock was not exercised'
+  # Status and stop must dispatch without start-only validation or storage work.
+  New-Case $false
+  $state.VM = [pscustomobject]@{Name='pi-vm-test'; State='Running'; Status='Operating normally'}
+  $options.Action = 'status'
+  $options.MemoryMB = 1
+  $options.DiskSize = 'not a disk size'
+  $result = & $scriptPath @options
+  Assert ($result.Name -eq 'pi-vm-test' -and $result.State -eq 'Running') 'Status dispatch returned the wrong VM'
+  Assert ($state.Calls.Count -eq 0 -and -not(Test-Path $build)) 'Status invoked startup work'
+
+  New-Case $false
+  $state.VM = [pscustomobject]@{Name='pi-vm-test'; State='Running'}
+  $options.Action = 'stop'
+  $options.MemoryMB = 1
+  & $scriptPath @options
+  Assert ($state.Calls.Count -eq 1 -and $state.Calls[0] -eq 'stop') 'Stop invoked startup work'
+  Assert ($state.VM.State -eq 'Off' -and -not(Test-Path $build)) 'Stop dispatch changed storage or failed'
+
   Write-Output "Hyper-V offline orchestration checks passed ($script:count isolated cases; no real Hyper-V or network)"
 } finally {
   Remove-Module Hyper-V -ErrorAction SilentlyContinue
