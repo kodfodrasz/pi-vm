@@ -12,13 +12,14 @@ worker.
    file remains unchanged.
 3. With an intentionally owned VM directory containing
    `creation-complete` whose contents are exactly `complete`, run `status`.
-   Verify that WMI reports the matching `pi-vm-<id>` VM. Run `start` and `stop`
-   only on that disposable VM and inspect the WMI return code and final state.
-4. Verify that status/start/stop refuse a registered VM when the marker is
-   absent or has any other contents.
+   Verify that WMI reports the matching `pi-vm-<id>` VM.
+4. Verify that status refuses a registered VM when the marker is absent or has
+   any other contents. `start` and `stop` currently return an explicit
+   unsupported error and must not call WMI mutation methods.
 
-Native creation is not implemented. In particular, do not infer a safe
-`DefineSystem` XML or use a PowerShell cmdlet as a workaround. Before that
-scope is expanded, validate the documented Hyper-V WMI classes and async job
-result contracts on Windows, then add offline-independent tests and a manual
-rollback procedure.
+Native creation and lifecycle mutation are not implemented. In particular,
+do not infer a safe `DefineSystem` XML, state-change output/job handling, or
+guest-shutdown component, and do not use a PowerShell cmdlet as a workaround.
+Before that scope is expanded, validate the documented Hyper-V WMI classes and
+async job result contracts on Windows, then add offline-independent tests and
+a manual rollback procedure.

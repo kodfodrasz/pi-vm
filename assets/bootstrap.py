@@ -27,6 +27,17 @@ def run(argv: list[str], **kwargs) -> subprocess.CompletedProcess:
     return subprocess.run(argv, check=True, **kwargs)
 
 
+def retry_script_bytes(content: bytes) -> bytes:
+    return content.replace(b"#!/usr/bin/env -S uv run --script\n", b"#!/usr/bin/python3\n", 1)
+
+
+def set_tree_owner(root: Path, user: str, group: str, owner=shutil.chown) -> None:
+    if not root.exists():
+        return
+    for path in (root, *root.rglob("*")):
+        owner(path, user=user, group=group)
+
+
 def atomic_bytes(path: Path, content: bytes, mode: int = 0o644) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile(dir=path.parent, prefix=f".{path.name}.", delete=False) as temporary:
@@ -61,7 +72,8 @@ def copy_staged_assets() -> None:
         atomic_bytes(destination_path, content, mode)
         os.chown(destination_path, 0, 0)
     installed_bootstrap = Path("/usr/local/sbin/pi-vm-bootstrap")
-    atomic_bytes(installed_bootstrap, (STAGE / "bootstrap.py").read_bytes(), 0o755)
+    retry_script = retry_script_bytes((STAGE / "bootstrap.py").read_bytes())
+    atomic_bytes(installed_bootstrap, retry_script, 0o755)
     os.chown(installed_bootstrap, 0, 0)
     local = STAGE / "local"
     if local.is_dir():
@@ -145,7 +157,7 @@ def configure_pi_user(hostname: str) -> None:
         target = Path(destination)
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(CONFIG / source, target)
-        os.chown(target, "pi", "pi")
+        shutil.chown(target, user="pi", group="pi")
     for source, destination, mode in (("pi-settings.json", "/home/pi/.pi/agent/settings.json", 0o600),
                                       ("AGENTS.md", "/home/pi/.pi/agent/AGENTS.md", 0o644),
                                       ("kodfodrasz/SKILL.md", "/home/pi/.pi/agent/skills/kodfodrasz/SKILL.md", 0o644)):
@@ -153,10 +165,17 @@ def configure_pi_user(hostname: str) -> None:
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(CONFIG / source, target)
         os.chmod(target, mode)
-        os.chown(target, "pi", "pi")
+        shutil.chown(target, user="pi", group="pi")
+    for directory in (Path("/home/pi/.config"), Path("/home/pi/.pi"), Path("/home/pi/.local")):
+        set_tree_owner(directory, "pi", "pi")
+    pi_local = Path("/home/pi/.local")
+    pi_local.mkdir(parents=True, exist_ok=True)
+    set_tree_owner(pi_local, "pi", "pi")
     run(["runuser", "-u", "pi", "--", "env", "HOME=/home/pi", "npm", "install", "--global", "--prefix", "/home/pi/.local/share/pi-npm", "@earendil-works/pi-coding-agent@1.1.0"])
+    set_tree_owner(Path("/home/pi/.local"), "pi", "pi")
     local_bin = Path("/home/pi/.local/bin")
     local_bin.mkdir(parents=True, exist_ok=True)
+    shutil.chown(local_bin, user="pi", group="pi")
     link = local_bin / "pi"
     link.unlink(missing_ok=True)
     link.symlink_to("/home/pi/.local/share/pi-npm/bin/pi")

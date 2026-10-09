@@ -71,10 +71,12 @@ def valid_image(path: Path) -> bool:
 
 
 def download_image(cache: Path = CACHE) -> Path:
-    cache.mkdir(parents=True, exist_ok=True)
+    cache.mkdir(parents=True, exist_ok=True, mode=0o700)
+    os.chmod(cache, 0o700)
     image = cache / IMAGE_NAME
     lock_path = cache / ".download.lock"
     with lock_path.open("a+") as lock:
+        os.chmod(lock_path, 0o600)
         fcntl.flock(lock, fcntl.LOCK_EX)
         if valid_image(image):
             return image
@@ -91,6 +93,7 @@ def download_image(cache: Path = CACHE) -> Path:
             if not valid_image(stage):
                 raise RuntimeError("downloaded Fedora image failed size, hash, or qcow2 checks")
             os.link(stage, image)
+            os.chmod(image, 0o600)
         finally:
             stage.unlink(missing_ok=True)
     return image
@@ -174,8 +177,17 @@ def qmp_powerdown(socket_path: Path) -> None:
 
 
 @contextlib.contextmanager
+def restrictive_umask():
+    old = os.umask(0o077)
+    try:
+        yield
+    finally:
+        os.umask(old)
+
+
+@contextlib.contextmanager
 def operation_lock(build: Path):
-    build.mkdir(parents=True, exist_ok=True)
+    build.mkdir(parents=True, exist_ok=True, mode=0o700)
     with (build / ".kvm.lock").open("a+") as lock:
         try:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -194,7 +206,7 @@ def build_instance(args: argparse.Namespace) -> tuple[Path, Path, Path]:
 
 def start(args: argparse.Namespace) -> None:
     instance, pid_file, disk = build_instance(args)
-    with operation_lock(Path(args.build).resolve()):
+    with restrictive_umask(), operation_lock(Path(args.build).resolve()):
         if process_status(pid_file, disk):
             raise RuntimeError(f"instance already active: {args.instance}")
         for command in ("qemu-img", QEMU, "xorriso"):
@@ -212,7 +224,8 @@ def start(args: argparse.Namespace) -> None:
             shutil.rmtree(instance)
         if instance.is_symlink():
             raise RuntimeError("refusing symlink instance directory")
-        instance.mkdir(parents=True, exist_ok=True)
+        instance.mkdir(parents=True, exist_ok=True, mode=0o700)
+        os.chmod(instance, 0o700)
         seed = instance / "seed.iso"
         if not disk.exists():
             if shutil.disk_usage(Path(args.build)).free < 2_000_000_000:
@@ -224,6 +237,7 @@ def start(args: argparse.Namespace) -> None:
             run(["qemu-img", "create", "-f", "qcow2", "-F", "qcow2", "-b", str(base), str(partial), args.disk])
             os.link(partial, disk)
             partial.unlink()
+            os.chmod(disk, 0o600)
         if not seed.is_file():
             raise RuntimeError("instance seed is missing")
         qmp = instance / "qmp.sock"
@@ -237,6 +251,9 @@ def start(args: argparse.Namespace) -> None:
                    "-device", "virtio-net-pci,netdev=net0", "-device", "virtio-balloon-pci"]
         with (instance / "qemu.log").open("ab") as log:
             subprocess.run(options, cwd=instance, stdout=log, stderr=log, check=True, close_fds=True)
+        for artifact in (instance / "qemu.log", instance / "serial.log", pid_file):
+            if artifact.exists():
+                os.chmod(artifact, 0o600)
     print(f"Started {args.instance}. SSH: ssh -p {port} pi@127.0.0.1")
 
 
@@ -263,7 +280,7 @@ def stop_or_status(args: argparse.Namespace) -> int:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("action", choices=("download", "start", "stop", "status"))
-    parser.add_argument("instance")
+    parser.add_argument("instance", nargs="?")
     parser.add_argument("--memory", type=int, default=2048)
     parser.add_argument("--cpus", type=int, default=2)
     parser.add_argument("--disk", default="16G")
@@ -276,6 +293,8 @@ def main(argv: list[str] | None = None) -> int:
         if args.action == "download":
             print(download_image(Path(args.cache)))
             return 0
+        if not args.instance:
+            parser.error("instance is required for start, stop, and status")
         return start(args) if args.action == "start" else stop_or_status(args)
     except (OSError, ValueError, RuntimeError, subprocess.CalledProcessError) as exc:
         parser.error(str(exc))

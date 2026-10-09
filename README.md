@@ -18,11 +18,12 @@ make kvm-stop INSTANCE=pipette
 
 The KVM tool downloads the pinned Fedora Cloud Base Generic qcow2 into
 `~/.cache/pi-vm/images`, checks its size, SHA-256, and `qemu-img check`, then
-uses it as an immutable backing file. Instance data is under `build/` (or
-`PI_VM_BUILD`) and cache data can be changed with `PI_VM_CACHE`. Seed files are
-rendered by `scripts/seed.py` and published atomically. `--force` only rebuilds
-a stopped instance; forced stop verifies the exact QEMU executable, exact
-`-drive file=` argument, and a pidfd before signalling.
+uses it as an immutable backing file. Cache and VM artifacts are created with
+private modes; instance data is under `build/` (or `PI_VM_BUILD`) and cache
+data can be changed with `PI_VM_CACHE`. Seed files are rendered by
+`scripts/seed.py` and published atomically without replacement. `--force` only
+rebuilds a stopped instance; forced stop verifies the exact QEMU executable,
+exact `-drive file=` argument, and a pidfd before signalling.
 
 The guest contract remains key-only SSH, enforcing SELinux, rootless Podman,
 Samba password setup, trusted firewall sources, Pi package installation,
@@ -52,23 +53,24 @@ root with `PI_VM_LOCAL_DIR`; do not put credentials into a self-contained ISO.
 `scripts/hyperv.py` is a deliberately bounded native feasibility prototype.
 Its `image` action downloads and verifies the pinned Fedora Azure archive,
 extracts it with Python `lzma`, validates the fixed VHD size and SHA-256, and
-publishes it without replacing an existing possible backing file. Existing
-VM status/start/stop use documented `Msvm_ComputerSystem` WMI/COM calls through
-`pywin32`, and require `build/<id>/creation-complete` containing `complete` so
-an unrelated VM named `pi-vm-<id>` cannot be managed accidentally.
+publishes it without replacing an existing possible backing file. Read-only VM status uses `Msvm_ComputerSystem` WMI/COM through `pywin32` and
+requires `build/<id>/creation-complete` containing `complete` so an unrelated
+VM named `pi-vm-<id>` cannot be inspected accidentally. Hyper-V start and stop
+return an explicit unsupported error; no unsafe WMI mutation is attempted.
 
 Creating a new Generation 2 VM, converting the fixed VHD to VHDX, creating a
 differencing child, attaching NoCloud media, and configuring firmware/network
 resources are intentionally refused. The verified WMI
-`DefineSystem`/resource-setting sequence and asynchronous image-management
-result handling still need a Windows validation run. There is no PowerShell
-fallback and no claim of unattended Hyper-V deployment readiness. These
-behaviors remain unrun on Linux.
+`DefineSystem`/resource-setting sequence, guest shutdown component, and
+asynchronous WMI output/job handling still need a Windows validation run. There
+is no PowerShell fallback and no claim of unattended Hyper-V deployment
+readiness. These behaviors remain unrun on Linux.
 
 ## Offline checks
 
-`make test` checks seed contracts, `/opt/pi-vm` staging, key inventory,
-Windows source normalization, resource parsing, exact QEMU PID safety,
-atomic-publish refusal, bootstrap Python syntax/CLI parsing, and Hyper-V
-platform validation without downloading an image, starting a VM, calling
-Hyper-V, changing networking, or changing host dependencies.
+`make test` runs the seed and validator suites. It checks seed contracts,
+`/opt/pi-vm` staging, key inventory, copied-renderer Windows source
+normalization, byte-preserved local payloads, private publication and race
+refusal, resource parsing, exact QEMU PID safety, bootstrap ownership/retry
+contracts, and Hyper-V cache locking/capacity checks. It does not download an
+image, start a VM, call Hyper-V, change networking, or change host dependencies.

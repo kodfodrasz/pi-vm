@@ -16,6 +16,7 @@ sequence still needs a Windows validation run before it is safe to implement.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
 import lzma
 import os
@@ -44,14 +45,45 @@ def verified_fixed_vhd(path: Path) -> bool:
     return path.is_file() and not path.is_symlink() and path.stat().st_size == FIXED_SIZE and sha256(path) == FIXED_SHA256
 
 
+@contextlib.contextmanager
+def exclusive_cache_lock(path: Path):
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    with path.open("a+b") as lock:
+        lock.write(b"\0")
+        lock.flush()
+        lock.seek(0)
+        if os.name == "nt":
+            import msvcrt
+            try:
+                msvcrt.locking(lock.fileno(), msvcrt.LK_NBLCK, 1)
+            except OSError as exc:
+                raise RuntimeError("another Hyper-V image operation is in progress") from exc
+        else:
+            import fcntl
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError as exc:
+                raise RuntimeError("another Hyper-V image operation is in progress") from exc
+        try:
+            yield
+        finally:
+            if os.name == "nt":
+                msvcrt.locking(lock.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                fcntl.flock(lock, fcntl.LOCK_UN)
+
+
 def download_and_extract(cache: Path) -> Path:
-    cache.mkdir(parents=True, exist_ok=True)
+    cache.mkdir(parents=True, exist_ok=True, mode=0o700)
+    os.chmod(cache, 0o700)
     archive = cache / IMAGE_NAME
     fixed = cache / FIXED_NAME
     lock = cache / ".download.lock"
     # Windows opens this exclusively. Linux uses the same conservative refusal;
     # the Hyper-V command is intended for one host operator at a time.
-    with lock.open("a+"):
+    with exclusive_cache_lock(lock):
+        if not verified_fixed_vhd(fixed) and shutil.disk_usage(cache).free < 12 * 1024**3:
+            raise RuntimeError("insufficient free space for Hyper-V image cache (need 12 GiB)")
         if not archive.is_file() or sha256(archive) != ARCHIVE_SHA256:
             if archive.exists() or archive.is_symlink():
                 raise RuntimeError(f"invalid cached archive will not be replaced: {archive}")
@@ -64,6 +96,7 @@ def download_and_extract(cache: Path) -> Path:
                 if sha256(temporary) != ARCHIVE_SHA256:
                     raise RuntimeError("compressed Fedora Azure image SHA-256 mismatch")
                 os.link(temporary, archive)
+                os.chmod(archive, 0o600)
             finally:
                 temporary.unlink(missing_ok=True)
         if verified_fixed_vhd(fixed):
@@ -79,6 +112,7 @@ def download_and_extract(cache: Path) -> Path:
             if not verified_fixed_vhd(temporary):
                 raise RuntimeError("decompressed payload is not the pinned fixed VHD")
             os.link(temporary, fixed)
+            os.chmod(fixed, 0o600)
         finally:
             temporary.unlink(missing_ok=True)
     return fixed
@@ -101,21 +135,6 @@ def vm_by_name(namespace, name: str):
     return matches[0] if len(matches) == 1 else None
 
 
-def invoke_vm(vm, requested_state: int) -> None:
-    # Msvm_ComputerSystem.RequestStateChange uses the documented RequestedState
-    # values: 2 is enabled and 3 is disabled.  WMI returns either a code or an
-    # async job wrapper; both are checked instead of treating invocation as success.
-    result = vm.RequestStateChange(requested_state)
-    code = int(result.ReturnValue) if hasattr(result, "ReturnValue") else int(result)
-    if code not in (0, 4096):  # 4096 means an async job was accepted.
-        raise RuntimeError(f"Hyper-V RequestStateChange failed with WMI code {code}")
-    job = getattr(result, "Job", None)
-    if job is not None:
-        state = int(job.JobState)
-        if state not in (7,):
-            raise RuntimeError(f"Hyper-V state-change job did not complete (state {state})")
-
-
 def require_owned(settings: argparse.Namespace) -> tuple[object, Path]:
     directory = Path(settings.build).resolve() / settings.instance
     marker = directory / "creation-complete"
@@ -129,23 +148,24 @@ def require_owned(settings: argparse.Namespace) -> tuple[object, Path]:
 
 
 def start_stop_status(settings: argparse.Namespace) -> int:
+    raise NotImplementedError(
+        "Hyper-V start/stop is disabled until documented WMI output/job handling "
+        "and the guest shutdown component are validated on Windows"
+    )
+
+
+def status_owned(settings: argparse.Namespace) -> int:
+    directory = Path(settings.build).resolve() / settings.instance
+    marker = directory / "creation-complete"
+    if not marker.is_file() or marker.read_text(encoding="utf-8") != "complete":
+        raise RuntimeError("refusing to inspect an unmarked or unrelated Hyper-V VM")
     namespace = native_hyperv()
     vm_name = "pi-vm-" + settings.instance
     vm = vm_by_name(namespace, vm_name)
     if vm is None:
         print(f"{vm_name} is not registered")
         return 1
-    directory = Path(settings.build).resolve() / settings.instance
-    marker = directory / "creation-complete"
-    if not marker.is_file() or marker.read_text(encoding="utf-8") != "complete":
-        raise RuntimeError("refusing to manage a VM without this instance's creation-complete marker")
-    if settings.action == "status":
-        print(f"{vm_name}: {vm.EnabledState}")
-        return 0
-    if settings.action == "start":
-        invoke_vm(vm, 2)
-    else:
-        invoke_vm(vm, 3)
+    print(f"{vm_name}: {vm.EnabledState}")
     return 0
 
 
@@ -168,8 +188,10 @@ def main(argv: list[str] | None = None) -> int:
             parser.error("instance must contain safe ASCII characters")
         if args.action == "start" and not (1024 <= args.memory_mb <= 1_048_576 and 1 <= args.cpus <= 1024):
             parser.error("memory must be at least 1024 MiB and CPUs at least one")
+        if args.action == "status":
+            return status_owned(args)
         return start_stop_status(args)
-    except (OSError, RuntimeError, ValueError) as exc:
+    except (OSError, RuntimeError, NotImplementedError, ValueError) as exc:
         parser.error(str(exc))
         return 2
 

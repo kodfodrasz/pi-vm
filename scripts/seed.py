@@ -51,7 +51,7 @@ def valid_name(value: str, pattern: str, label: str) -> str:
 def normalized_asset(path: Path, binary: bool) -> bytes:
     if binary:
         return path.read_bytes()
-    return path.read_text(encoding="utf-8-sig").encode("utf-8")
+    return path.read_text(encoding="utf-8-sig").replace("\r\n", "\n").replace("\r", "\n").encode("utf-8")
 
 
 def collect_assets() -> list[tuple[str, Path, str, bytes]]:
@@ -64,7 +64,10 @@ def collect_assets() -> list[tuple[str, Path, str, bytes]]:
                 continue
             relative = source.relative_to(LOCAL).as_posix()
             mode = "0700" if relative == "bootstrap.py" else "0600"
-            assets.append((f"local/{relative}", source, mode, normalized_asset(source, relative == "bootstrap.sh")))
+            # Only executable Python bootstrap text is normalized. Other local
+            # payloads can be arbitrary bytes and must remain byte-for-byte stable.
+            assets.append((f"local/{relative}", source, mode,
+                           normalized_asset(source, False) if relative == "bootstrap.py" else source.read_bytes()))
     return assets
 
 
@@ -93,9 +96,12 @@ def render_seed(instance_id: str, hostname: str, output_dir: Path) -> None:
     meta_data = (ASSETS / "cloud-init/meta-data.in").read_text(encoding="utf-8-sig")
     meta_data = meta_data.replace("__INSTANCE_ID_YAML__", json.dumps(instance_id))
     meta_data = meta_data.replace("__HOSTNAME_YAML__", json.dumps(hostname))
-    output_dir.mkdir(parents=True, exist_ok=True)
-    (output_dir / "user-data").write_text(user_data, encoding="utf-8", newline="\n")
-    (output_dir / "meta-data").write_text(meta_data, encoding="utf-8", newline="\n")
+    output_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    os.chmod(output_dir, 0o700)
+    for name, content in (("user-data", user_data), ("meta-data", meta_data)):
+        target = output_dir / name
+        target.write_text(content, encoding="utf-8", newline="\n")
+        os.chmod(target, 0o600)
 
 
 def build_iso(files: Path, output: Path) -> None:
@@ -113,14 +119,8 @@ def build_iso(files: Path, output: Path) -> None:
             image.VolumeName = "cidata"
             image.Root.AddTree(str(files), False)
             stream = image.CreateResultImage().ImageStream
-            with output.open("xb") as destination:
-                while True:
-                    chunk = stream.Read(1024 * 1024)
-                    if isinstance(chunk, tuple):
-                        chunk = chunk[0]
-                    if not chunk:
-                        break
-                    destination.write(bytes(chunk))
+            stream = query_istream(stream, pythoncom.IID_IStream)
+            write_istream(stream, output)
         finally:
             pythoncom.CoUninitialize()
         return
@@ -128,10 +128,27 @@ def build_iso(files: Path, output: Path) -> None:
                     "-o", str(output), str(files)], check=True)
 
 
+def query_istream(stream, iid):
+    return stream.QueryInterface(iid)
+
+
+def write_istream(stream, output: Path) -> None:
+    with output.open("xb") as destination:
+        while True:
+            chunk = stream.Read(1024 * 1024)
+            if isinstance(chunk, tuple):
+                chunk = chunk[0]
+            if not chunk:
+                break
+            destination.write(bytes(chunk))
+    if output.stat().st_size == 0:
+        raise RuntimeError("IMAPI2FS produced an empty ISO")
+
+
 def publish_iso(instance_id: str, hostname: str, output: Path) -> Path:
     if output.exists() or output.is_symlink():
         raise FileExistsError(f"seed ISO exists; remove it explicitly: {output}")
-    output.parent.mkdir(parents=True, exist_ok=True)
+    output.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     with tempfile.TemporaryDirectory(prefix=f".seed-{instance_id}.", dir=output.parent) as temporary:
         files = Path(temporary) / "files"
         render_seed(instance_id, hostname, files)
@@ -139,14 +156,10 @@ def publish_iso(instance_id: str, hostname: str, output: Path) -> Path:
         build_iso(files, partial)
         if not partial.is_file() or partial.stat().st_size == 0:
             raise RuntimeError("ISO builder produced no image")
-        # Link publication refuses replacement and is atomic on filesystems that
-        # support hard links; Windows uses an atomic move with the same refusal.
-        if os.name == "nt":
-            if output.exists():
-                raise FileExistsError(output)
-            os.replace(partial, output)
-        else:
-            os.link(partial, output)
+        # A hard-link publication is atomic and fails if another publisher won
+        # the destination race. It also works on NTFS without replacement.
+        os.link(partial, output)
+        os.chmod(output, 0o600)
     return output
 
 

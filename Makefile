@@ -31,3 +31,4 @@ validate:
 
 test:
 	$(uv-run) tests/test_python_tools.py
+	$(uv-run) tests/validate.py
