@@ -26,6 +26,7 @@ if failure_marker.exists():
 if not success_marker.is_file():
     print(json.dumps({'ready': False}))
     raise SystemExit(0)
+bootstrap_recovered = 'recovered_from_failure=true' in success_marker.read_text()
 def run(argv):
     p = subprocess.run(argv, text=True, capture_output=True, timeout=15,
                        env=dict(os.environ, PI_OFFLINE='1'))
@@ -38,7 +39,8 @@ if globals().get('EXPECTED_INSTANCE') is not None and instance_id != EXPECTED_IN
     raise SystemExit(0)
 cloud = subprocess.run(['sudo', '-n', 'cloud-init', 'status', '--format', 'json'],
                        text=True, capture_output=True, timeout=15)
-if cloud.returncode not in (0, 2):
+allowed_cloud_statuses = (0, 1, 2) if bootstrap_recovered else (0, 2)
+if cloud.returncode not in allowed_cloud_statuses:
     raise RuntimeError('cloud-init status command failed')
 status = json.loads(cloud.stdout)
 # The bootstrap marker can precede cloud-final finishing by a short interval.
@@ -82,6 +84,7 @@ print(json.dumps({
     'shell': pwd.getpwuid(os.getuid()).pw_shell,
     'hostname': run(['hostname']), 'cloud': status,
     'instance_id': instance_id,
+    'bootstrap_recovered': bootstrap_recovered,
     'root_bytes': fs.f_blocks * fs.f_frsize,
     'pi': run([str(home/'.local/bin/pi'), '--version']),
     'starship': run(['starship', '--version']).splitlines()[0],
@@ -159,22 +162,46 @@ def check_metadata(data, hostname, disk_bytes, instance_id='pipette'):
         'guest instance ID mismatch (check SSH port)'
     )
 
+    recovered = data.get('bootstrap_recovered')
+    require(type(recovered) is bool, 'bootstrap recovery metadata missing')
     cloud = data.get('cloud')
-    require(
-        isinstance(cloud, dict) and cloud.get('status') == 'done',
-        'cloud-init not done'
-    )
-    require(cloud.get('errors') == [], 'cloud-init errors are present or missing')
+    require(isinstance(cloud, dict), 'cloud-init status metadata missing')
+    errors = cloud.get('errors')
+    if recovered:
+        require(cloud.get('status') in ('done', 'error'), 'cloud-init not finished')
+        require(isinstance(errors, list), 'cloud-init errors metadata missing')
+        for error in errors:
+            require(
+                isinstance(error, str)
+                and 'scripts_user' in error
+                and 'Runparts: 1 failures (runcmd)' in error,
+                'unexpected recovered cloud-init error'
+            )
+    else:
+        require(cloud.get('status') == 'done', 'cloud-init not done')
+        require(errors == [], 'cloud-init errors are present or missing')
+
     warnings = cloud.get('recoverable_errors')
     require(isinstance(warnings, dict), 'cloud-init warning metadata missing')
+    known_hostname_warning = f'Failed to set the hostname to {hostname} ({hostname})'
     for category, messages in warnings.items():
         require(
             category == 'WARNING' and isinstance(messages, list),
             'unexpected cloud-init warning category'
         )
         for message in messages:
+            known_recovery_warning = (
+                recovered
+                and isinstance(message, str)
+                and (
+                    message == 'Failed to run module scripts_user '
+                               '(scripts in /var/lib/cloud/instance/scripts)'
+                    or (message.startswith('Running module scripts_user (')
+                        and message.endswith(') failed'))
+                )
+            )
             require(
-                message == f'Failed to set the hostname to {hostname} ({hostname})',
+                message == known_hostname_warning or known_recovery_warning,
                 'unexpected cloud-init warning'
             )
 
@@ -297,9 +324,18 @@ def validate(args):
     except (ValueError, KeyError) as exc:
         raise Failure('cannot read virtual disk size') from exc
     warnings = check_metadata(data, args.hostname, disk, args.instance)
-    report = {'instance': args.instance, 'status': 'PASS', 'disk_bytes': disk,
-              'root_bytes': data['root_bytes'], 'hostname': data['hostname'],
-              'cloud_init_warnings': warnings, 'configs': True, 'rootless': True}
+    report = {
+        'instance': args.instance,
+        'status': 'PASS',
+        'disk_bytes': disk,
+        'root_bytes': data['root_bytes'],
+        'hostname': data['hostname'],
+        'bootstrap_recovered': data['bootstrap_recovered'],
+        'cloud_init_errors': data['cloud']['errors'],
+        'cloud_init_warnings': warnings,
+        'configs': True,
+        'rootless': True,
+    }
     if args.nested:
         code = """import pathlib
 import subprocess

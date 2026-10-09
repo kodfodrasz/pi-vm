@@ -10,7 +10,11 @@ The guest includes:
 - Pi **1.1.0**, Node.js, npm, Git, ripgrep, and fd.
 - Vim, micro, tmux, fish, fastfetch, and Starship **1.26.0**.
 - Podman, Python, make, GCC, curl, jq, rsync, and unzip.
-- Fedora kernel balloon drivers and Hyper-V guest services.
+- Fedora kernel balloon drivers and Hyper-V guest services, without Azure guest agents.
+- Samba home-directory sharing with Avahi and WSDD discovery.
+- firewalld with SSH open everywhere and trusted LAN/VPN source zones.
+- Pi web access, subagents, usage, keep-going, and usage-reset packages.
+- The Kodfodrasz coding skill and preferred delegation/model settings.
 
 Vim, tmux, and Starship settings come from this host. Fish uses a small,
 portable config and completions checked against Pi 1.1.0. Starship is a pinned,
@@ -20,8 +24,9 @@ No QEMU, libvirt, or KVM tools are installed in the guest. The kernel can still
 support nested KVM. SELinux stays enforcing. Rootless Podman has user ID ranges
 and user linger enabled.
 
-SSH uses the public keys in `assets/authorized_keys`. These are the combined
-keys from the original user's authorized keys and public key files. Their IDs
+SSH is allowed from every network but accepts public keys only. It uses the
+keys in `assets/authorized_keys`. These are the combined keys from the original
+user's authorized keys and public key files. Their IDs
 and fingerprints are in `assets/public-key-identities.txt`. No private keys,
 Pi credentials, or session history are copied. Password login is off. The `pi`
 user has password-free sudo. **Anyone holding one of these keys can become root.**
@@ -109,6 +114,32 @@ host-key checks.
 Host logs are `build/ID/serial.log` and `build/ID/qemu.log`. VM control uses a
 local QMP socket in the same directory. Treat your build directory as private.
 
+### Samba and network discovery
+
+Samba exports each user's own home directory through the `[homes]` share.
+Avahi advertises `_smb._tcp`, and WSDD supports Windows network discovery.
+The initial Samba account is `pi`; first boot prints its random password and
+these commands to the serial and cloud-init logs:
+
+```sh
+sudo smbpasswd pi
+sudo rm -f /var/lib/pi-vm/samba-initial-password
+```
+
+The initial value also remains in the root-only file shown above until you
+change it and remove the file.
+
+firewalld allows key-only SSH in the public zone. The trusted zone accepts the
+source ranges named in `assets/config/firewall-sources.conf`:
+
+- `10.0.0.0/8` — home LAN/private Hyper-V network
+- `192.168.100.0/24` — VPN
+
+Samba itself accepts only loopback and those two ranges. Avahi and WSDD are
+allowed in the public zone so clients can discover the share. Container bridge
+ranges are not hard-coded into the VM firewall. `10.89.0.0/24` on the source
+machine belongs to a specific root-owned Podman network, not to the LAN or VPN.
+
 Forced stop verifies the QEMU executable and exact disk path before signalling
 the process. Graceful and forced stops preserve the disk.
 
@@ -186,6 +217,34 @@ cloud-init on an old disk. Open the console with `vmconnect.exe localhost pi-vm-
 
 A real Windows host is still required to verify IMAPI2FS and Hyper-V behavior.
 Follow `docs/hyperv-manual-test.md`.
+
+## Pi setup and private configuration
+
+Pi packages are installed through `pi install` with pinned package versions.
+The VM receives a reviewed subset of this machine's Pi setup: preferred models,
+subagent model assignments, cost-aware delegation rules, and the Kodfodrasz
+skill. It does not receive authentication, trust decisions, sessions, usage
+records, or provider credentials.
+
+First boot creates `/home/pi/.ssh/pi-vm-deploy` inside the guest and prints only
+its public key. After adding that public key as a deploy key to a private
+repository, clone with:
+
+```sh
+GIT_SSH_COMMAND='ssh -i ~/.ssh/pi-vm-deploy -o IdentitiesOnly=yes' \
+    git clone REPOSITORY
+```
+
+For configuration that should travel inside the NoCloud ISO, create an ignored
+`local/` directory in this checkout. Its files are embedded under
+`/etc/pi-vm/local/` with root-only permissions. If `local/bootstrap.sh` exists,
+first boot runs it as root with `PI_VM_LOCAL_DIR=/etc/pi-vm/local`.
+
+This keeps setup self-contained and needs no S3 service. A plaintext private key
+placed in `local/` makes every copy of the seed ISO a credential. Prefer the
+guest-generated deploy key. If fully unattended secret delivery is required,
+use an encrypted local payload and provide its decryption key separately; a
+self-contained unattended ISO cannot also conceal its own secret.
 
 ## Checks and repeatability
 

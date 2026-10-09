@@ -15,7 +15,7 @@ spec.loader.exec_module(v)
 
 def good():
     return {'ready': True, 'user': 'pi', 'shell': '/bin/fish', 'hostname': 'pipette',
-            'instance_id': 'pipette',
+            'instance_id': 'pipette', 'bootstrap_recovered': False,
             'cloud': {'status': 'done', 'errors': [], 'recoverable_errors': {}},
             'pi': '1.1.0', 'starship': 'starship 1.26.0', 'rootless': True,
             'selinux': 'Enforcing', 'balloon_driver': True, 'configs': True,
@@ -67,6 +67,40 @@ class ValidatorTests(unittest.TestCase):
         warnings = {'WARNING': ['Failed to set the hostname to pipette (pipette)']}
         data['cloud']['recoverable_errors'] = warnings
         self.assertEqual(v.check_metadata(data, 'pipette', 8*1024**3), warnings)
+
+    def test_recovered_bootstrap_history_is_reported(self):
+        data = good()
+        data['bootstrap_recovered'] = True
+        data['cloud'] = {
+            'status': 'error',
+            'errors': [
+                "('scripts_user', RuntimeError('Runparts: 1 failures (runcmd)'))"
+            ],
+            'recoverable_errors': {
+                'WARNING': [
+                    'Failed to run module scripts_user '
+                    '(scripts in /var/lib/cloud/instance/scripts)',
+                    "Running module scripts_user (<module 'cloudinit.config.cc_scripts_user'>) failed",
+                ]
+            },
+        }
+        self.assertEqual(
+            v.check_metadata(data, 'pipette', 8*1024**3),
+            data['cloud']['recoverable_errors'],
+        )
+
+    def test_recovery_rejects_unrelated_cloud_history(self):
+        bad_clouds = [
+            {'status': 'error', 'errors': ['network failed'], 'recoverable_errors': {}},
+            {'status': 'error', 'errors': [],
+             'recoverable_errors': {'WARNING': ['network failed']}},
+        ]
+        for cloud in bad_clouds:
+            data = good()
+            data['bootstrap_recovered'] = True
+            data['cloud'] = cloud
+            with self.subTest(cloud=cloud), self.assertRaises(v.Failure):
+                v.check_metadata(data, 'pipette', 8*1024**3)
 
     def test_password_or_missing_auth_rejected(self):
         for key in good()['sshd']:
@@ -124,7 +158,9 @@ class ValidatorTests(unittest.TestCase):
     def test_wrong_instance_stops_before_config_probes(self):
         output = io.StringIO()
         with patch.object(v.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, 'other-vm', '')) as run, \
-             patch.object(Path, 'is_file', return_value=True), contextlib.redirect_stdout(output):
+             patch.object(Path, 'is_file', return_value=True), \
+             patch.object(Path, 'read_text', return_value='recovered_from_failure=false'), \
+             contextlib.redirect_stdout(output):
             with self.assertRaises(SystemExit):
                 exec(v.REMOTE, {'EXPECTED_INSTANCE': 'pipette'})
         self.assertEqual(json.loads(output.getvalue()), {'ready': True, 'instance_id': 'other-vm'})
@@ -135,7 +171,25 @@ class ValidatorTests(unittest.TestCase):
         status = {'status': 'running', 'errors': [], 'recoverable_errors': {}}
         output = io.StringIO()
         with patch.object(v.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, json.dumps(status), '')), \
-             patch.object(Path, 'is_file', return_value=True), contextlib.redirect_stdout(output):
+             patch.object(Path, 'is_file', return_value=True), \
+             patch.object(Path, 'read_text', return_value='recovered_from_failure=false'), \
+             contextlib.redirect_stdout(output):
+            with self.assertRaises(SystemExit) as result:
+                exec(v.REMOTE, {})
+        self.assertEqual(result.exception.code, 0)
+        self.assertEqual(json.loads(output.getvalue()), {'ready': False})
+
+    def test_recovered_cloud_status_exit_one_is_collected(self):
+        status = {'status': 'running', 'errors': [], 'recoverable_errors': {}}
+        replies = [
+            subprocess.CompletedProcess([], 0, 'pipette', ''),
+            subprocess.CompletedProcess([], 1, json.dumps(status), ''),
+        ]
+        output = io.StringIO()
+        with patch.object(v.subprocess, 'run', side_effect=replies), \
+             patch.object(Path, 'is_file', return_value=True), \
+             patch.object(Path, 'read_text', return_value='recovered_from_failure=true'), \
+             contextlib.redirect_stdout(output):
             with self.assertRaises(SystemExit) as result:
                 exec(v.REMOTE, {})
         self.assertEqual(result.exception.code, 0)
@@ -150,7 +204,8 @@ class ValidatorTests(unittest.TestCase):
             output = json.dumps(good()['cloud']) if 'cloud-init' in argv else ''
             return subprocess.CompletedProcess(argv, 0, output, '')
         with patch.object(v.subprocess, 'run', side_effect=remote_command) as run, \
-             patch.object(Path, 'is_file', return_value=True):
+             patch.object(Path, 'is_file', return_value=True), \
+             patch.object(Path, 'read_text', return_value='recovered_from_failure=false'):
             with self.assertRaisesRegex(RuntimeError, 'unknown command'):
                 exec(v.REMOTE, {})
         self.assertTrue(any('kill-server' in call.args[0] for call in run.call_args_list))
@@ -163,7 +218,8 @@ class ValidatorTests(unittest.TestCase):
                 output = json.dumps(good()['cloud']) if 'cloud-init' in argv else ''
                 return subprocess.CompletedProcess(argv, 0, output, '')
             with patch.object(v.subprocess, 'run', side_effect=remote_command), \
-                 patch.object(Path, 'is_file', return_value=True):
+                 patch.object(Path, 'is_file', return_value=True), \
+                 patch.object(Path, 'read_text', return_value='recovered_from_failure=false'):
                 with self.subTest(code=code), self.assertRaisesRegex(RuntimeError, 'temporary tmux'):
                     exec(v.REMOTE, {})
 
@@ -191,6 +247,7 @@ class ValidatorTests(unittest.TestCase):
         output = io.StringIO()
         with patch.object(v.subprocess, 'run', side_effect=remote_command) as run, \
              patch.object(Path, 'is_file', return_value=True), patch.object(Path, 'is_dir', return_value=True), \
+             patch.object(Path, 'read_text', return_value='recovered_from_failure=false'), \
              patch.dict(os.environ, {'SSH_CONNECTION': '10.0.2.2 49152 10.0.2.15 22'}), \
              contextlib.redirect_stdout(output):
             exec(v.REMOTE, {})

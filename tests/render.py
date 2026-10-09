@@ -65,8 +65,17 @@ def check_rendered_seed(directory):
         for line in user_data.splitlines()
         if line.strip().startswith('content: ')
     ]
-    require((ROOT / 'assets/bootstrap.sh').read_bytes() in payloads,
-            'Bootstrap script was not embedded')
+    required_assets = [
+        ROOT / 'assets/bootstrap.sh',
+        ROOT / 'assets/config/smb.conf',
+        ROOT / 'assets/config/firewall-sources.conf',
+        ROOT / 'assets/config/avahi-samba.service',
+        ROOT / 'assets/pi/settings.json',
+        ROOT / 'assets/pi/AGENTS.md',
+        ROOT / 'assets/skills/kodfodrasz/SKILL.md',
+    ]
+    for asset in required_assets:
+        require(asset.read_bytes() in payloads, f'{asset.name} was not embedded')
     subprocess.run(['bash', '-n', str(ROOT / 'assets/bootstrap.sh')], check=True)
 
 
@@ -106,12 +115,40 @@ def check_windows_line_endings(directory):
         require(not actual.startswith(b'\xef\xbb\xbf'), 'Rendered seed contains a BOM')
 
 
+def check_local_payload(directory):
+    local_root = directory / 'local-root'
+    shutil.copytree(ROOT / 'assets', local_root / 'assets')
+    (local_root / 'scripts').mkdir()
+    shutil.copyfile(RENDERER, local_root / 'scripts/render-seed.py')
+    (local_root / 'local').mkdir()
+    bootstrap = b'#!/usr/bin/bash\necho local setup\n'
+    windows_bootstrap = b'\xef\xbb\xbf#!/usr/bin/bash\r\necho local setup\r\n'
+    private_data = b'private-config\x00binary\r\n'
+    (local_root / 'local/bootstrap.sh').write_bytes(windows_bootstrap)
+    (local_root / 'local/config.bin').write_bytes(private_data)
+
+    output = local_root / 'seed'
+    subprocess.run([
+        'python3', str(local_root / 'scripts/render-seed.py'),
+        '--instance-id', 'local-test', '--output-dir', str(output)
+    ], check=True)
+    user_data = (output / 'user-data').read_text()
+    payloads = [
+        base64.b64decode(line.strip().split(': ', 1)[1])
+        for line in user_data.splitlines()
+        if line.strip().startswith('content: ')
+    ]
+    require(bootstrap in payloads, 'Local bootstrap was not embedded')
+    require(private_data in payloads, 'Binary local payload was not embedded')
+
+
 def main():
     with tempfile.TemporaryDirectory() as temporary:
         directory = Path(temporary)
         check_rendered_seed(directory)
         check_invalid_instance_ids(directory)
         check_windows_line_endings(directory)
+        check_local_payload(directory)
     print('Seed rendering checks passed')
 
 

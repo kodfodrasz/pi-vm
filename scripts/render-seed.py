@@ -8,6 +8,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 ASSETS = ROOT / "assets"
+LOCAL = ROOT / "local"
 EMBED = {
     "/etc/pi-vm/authorized_keys": (ASSETS / "authorized_keys", "0600", "root:root"),
     "/etc/pi-vm/public-key-identities.txt": (ASSETS / "public-key-identities.txt", "0644", "root:root"),
@@ -16,6 +17,12 @@ EMBED = {
     "/etc/pi-vm/starship.toml": (ASSETS / "config/starship.toml", "0644", "root:root"),
     "/etc/pi-vm/config.fish": (ASSETS / "config/config.fish", "0644", "root:root"),
     "/etc/pi-vm/pi.fish": (ASSETS / "config/pi.fish", "0644", "root:root"),
+    "/etc/pi-vm/smb.conf": (ASSETS / "config/smb.conf", "0644", "root:root"),
+    "/etc/pi-vm/firewall-sources.conf": (ASSETS / "config/firewall-sources.conf", "0644", "root:root"),
+    "/etc/pi-vm/avahi-samba.service": (ASSETS / "config/avahi-samba.service", "0644", "root:root"),
+    "/etc/pi-vm/pi-settings.json": (ASSETS / "pi/settings.json", "0644", "root:root"),
+    "/etc/pi-vm/AGENTS.md": (ASSETS / "pi/AGENTS.md", "0644", "root:root"),
+    "/etc/pi-vm/kodfodrasz/SKILL.md": (ASSETS / "skills/kodfodrasz/SKILL.md", "0644", "root:root"),
     "/usr/local/sbin/pi-vm-bootstrap": (ASSETS / "bootstrap.sh", "0755", "root:root"),
 }
 
@@ -32,13 +39,32 @@ def main():
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", instance_id):
         parser.error("instance-id must contain 1-128 safe ASCII characters")
     args.output_dir.mkdir(parents=True, exist_ok=True)
+    embedded = dict(EMBED)
+    if LOCAL.is_dir():
+        for source in sorted(LOCAL.rglob("*")):
+            if source.is_symlink():
+                parser.error(f"local payload must not contain symlinks: {source}")
+            if not source.is_file():
+                continue
+            relative = source.relative_to(LOCAL).as_posix()
+            permissions = "0700" if relative == "bootstrap.sh" else "0600"
+            embedded[f"/etc/pi-vm/local/{relative}"] = (
+                source, permissions, "root:root"
+            )
+
     write_files = []
-    for dest, (source, permissions, owner) in EMBED.items():
+    for dest, (source, permissions, owner) in embedded.items():
         if not source.is_file():
             parser.error(f"missing asset: {source}")
-        # All embedded assets are UTF-8 text. Normalize Windows CRLF and BOMs
-        # before encoding: Linux shebangs must not end with a carriage return.
-        content = source.read_text(encoding="utf-8-sig").encode("utf-8")
+        is_local_bootstrap = (
+            source.is_relative_to(LOCAL)
+            and source.relative_to(LOCAL).as_posix() == "bootstrap.sh"
+        )
+        if source.is_relative_to(LOCAL) and not is_local_bootstrap:
+            content = source.read_bytes()
+        else:
+            # Executable Linux scripts need LF line endings and no UTF-8 BOM.
+            content = source.read_text(encoding="utf-8-sig").encode("utf-8")
         payload = base64.b64encode(content).decode("ascii")
         write_files.extend([
             f"  - path: {json.dumps(dest)}",

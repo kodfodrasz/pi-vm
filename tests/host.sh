@@ -7,7 +7,9 @@ export TMPDIR=${TMPDIR:-$root/build/test-tmp}
 mkdir -p "$TMPDIR"
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 python3 "$root/tests/render.py"
+python3 -m json.tool "$root/assets/pi/settings.json" >/dev/null
 if command -v fish >/dev/null; then fish -n "$root/assets/config/config.fish" "$root/assets/config/pi.fish"; fi
+if command -v testparm >/dev/null; then testparm -s "$root/assets/config/smb.conf" >/dev/null; fi
 python3 "$root/scripts/render-seed.py" --instance-id host-test-unique --output-dir "$tmp/seed"
 grep -q 'host-test-unique' "$tmp/seed/meta-data"
 grep -q '__WRITE_FILES__' "$tmp/seed/user-data" && exit 1 || true
