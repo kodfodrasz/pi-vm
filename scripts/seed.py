@@ -22,8 +22,8 @@ ROOT = Path(__file__).resolve().parents[1]
 ASSETS = ROOT / "assets"
 LOCAL = ROOT / "local"
 
-# The ISO is a staging transport. Bootstrap copies the files that it needs to
-# their real /etc locations after cloud-init has mounted the seed.
+# The ISO is a staging transport. The Bash bootstrap copies the files that it
+# needs to their real /etc locations after cloud-init has mounted the seed.
 EMBED = {
     "authorized_keys": (ASSETS / "authorized_keys", "0600", "root:root"),
     "public-key-identities.txt": (ASSETS / "public-key-identities.txt", "0644", "root:root"),
@@ -38,7 +38,10 @@ EMBED = {
     "pi/settings.json": (ASSETS / "pi/settings.json", "0600", "root:root"),
     "pi/AGENTS.md": (ASSETS / "pi/AGENTS.md", "0644", "root:root"),
     "skills/kodfodrasz/SKILL.md": (ASSETS / "skills/kodfodrasz/SKILL.md", "0644", "root:root"),
-    "bootstrap.py": (ASSETS / "bootstrap.py", "0700", "root:root"),
+    "config/sshd.conf": (ASSETS / "config/sshd.conf", "0644", "root:root"),
+    "config/sudoers": (ASSETS / "config/sudoers", "0440", "root:root"),
+    "Makefile": (ASSETS / "Makefile", "0644", "root:root"),
+    "bootstrap.sh": (ASSETS / "bootstrap.sh", "0700", "root:root"),
 }
 
 
@@ -63,11 +66,11 @@ def collect_assets() -> list[tuple[str, Path, str, bytes]]:
             if not source.is_file():
                 continue
             relative = source.relative_to(LOCAL).as_posix()
-            mode = "0700" if relative == "bootstrap.py" else "0600"
-            # Only executable Python bootstrap text is normalized. Other local
-            # payloads can be arbitrary bytes and must remain byte-for-byte stable.
+            mode = "0700" if relative == "bootstrap.sh" else "0600"
+            # Only the executable Bash payload is normalized. Other local
+            # payloads, including a legacy bootstrap.py, remain byte-for-byte stable.
             assets.append((f"local/{relative}", source, mode,
-                           normalized_asset(source, False) if relative == "bootstrap.py" else source.read_bytes()))
+                           normalized_asset(source, False) if relative == "bootstrap.sh" else source.read_bytes()))
     return assets
 
 

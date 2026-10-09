@@ -31,9 +31,6 @@ def load(name: str, path: Path):
 seed = load("seed", ROOT / "scripts/seed.py")
 kvm = load("kvm", ROOT / "scripts/kvm.py")
 hyperv = load("hyperv", ROOT / "scripts/hyperv.py")
-bootstrap = load("bootstrap", ROOT / "assets/bootstrap.py")
-
-
 class SeedTests(unittest.TestCase):
     def test_render_stages_everything_under_opt_pi_vm(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -42,11 +39,13 @@ class SeedTests(unittest.TestCase):
             user_data = (output / "user-data").read_text()
             for placeholder in ("__HOSTNAME_YAML__", "__HOSTNAME_SHELL__", "__WRITE_FILES__", "__AUTHORIZED_KEYS__"):
                 self.assertNotIn(placeholder, user_data)
-            self.assertIn("/opt/pi-vm/bootstrap.py", user_data)
+            self.assertIn("/opt/pi-vm/bootstrap.sh", user_data)
+            self.assertIn("/opt/pi-vm/Makefile", user_data)
             self.assertIn("/opt/pi-vm/config/smb.conf", user_data)
             payloads = [base64.b64decode(line.split(": ", 1)[1])
                         for line in user_data.splitlines() if line.strip().startswith("content: ")]
-            self.assertIn((ROOT / "assets/bootstrap.py").read_bytes(), payloads)
+            self.assertIn((ROOT / "assets/bootstrap.sh").read_bytes(), payloads)
+            self.assertIn((ROOT / "assets/Makefile").read_bytes(), payloads)
             self.assertNotIn("/etc/pi-vm/", user_data)
 
     def test_authorized_key_inventory_matches_key_blobs(self):
@@ -68,7 +67,7 @@ class SeedTests(unittest.TestCase):
             local.mkdir(exist_ok=True)
             link = local / ".offline-test-link"
             try:
-                link.symlink_to(ROOT / "assets/bootstrap.py")
+                link.symlink_to(ROOT / "assets/bootstrap.sh")
                 with self.assertRaises(ValueError):
                     seed.render_seed("offline-test", "pipette", Path(directory))
             finally:
@@ -105,43 +104,23 @@ class SeedTests(unittest.TestCase):
 
 
 class BootstrapTests(unittest.TestCase):
-    def test_retry_entrypoint_uses_system_python(self):
-        content = b"#!/usr/bin/env -S uv run --script\n# /// script\n"
-        self.assertEqual(bootstrap.retry_script_bytes(content), b"#!/usr/bin/python3\n# /// script\n")
-
-    def test_directory_tree_owner_is_applied_with_explicit_fake(self):
+    def test_guest_scripts_parse_and_wrapper_uses_make(self):
+        result = subprocess.run(["bash", "-n", str(ROOT / "assets/bootstrap.sh")],
+                                text=True, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            (root / "nested").mkdir()
-            (root / "nested/file").write_bytes(b"x")
-            calls = []
-            bootstrap.set_tree_owner(root, "pi", "pi", owner=lambda path, **kwargs: calls.append((path, kwargs)))
-            self.assertEqual({path for path, _ in calls}, {root, root / "nested", root / "nested/file"})
-            self.assertTrue(all(kwargs == {"user": "pi", "group": "pi"} for _, kwargs in calls))
-
-    def test_directory_tree_owner_skips_links_and_allows_retries(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory) / "tree"
-            root.mkdir()
-            executable = root / "pi-executable"
-            executable.write_bytes(b"inside")
-            (root / "pi").symlink_to(executable)
-            external = Path(directory) / "external"
-            external.write_bytes(b"outside")
-            (root / "link").symlink_to(external)
-            calls = []
-            owner = lambda path, **kwargs: calls.append(path)
-            bootstrap.set_tree_owner(root, "pi", "pi", owner=owner)
-            bootstrap.set_tree_owner(root, "pi", "pi", owner=owner)
-            self.assertEqual(calls.count(root), 2)
-            self.assertEqual(calls.count(executable), 2)
-            self.assertNotIn(external, calls)
-            self.assertNotIn(root / "pi", calls)
-            self.assertNotIn(root / "link", calls)
-            root_link = Path(directory) / "root-link"
-            root_link.symlink_to(root, target_is_directory=True)
-            with self.assertRaises(RuntimeError):
-                bootstrap.set_tree_owner(root_link, "pi", "pi", owner=owner)
+            result = subprocess.run(
+                ["make", "-n", "-f", str(ROOT / "assets/Makefile"), "bootstrap"],
+                env={**os.environ, "STAGE": str(ROOT / "assets"),
+                     "CONFIG": str(Path(directory) / "etc" / "pi-vm"),
+                     "CACHE": str(Path(directory) / "cache"),
+                     "VM_HOSTNAME": "offline-test"},
+                text=True, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        wrapper = (ROOT / "assets/bootstrap.sh").read_text()
+        self.assertIn("make --no-print-directory", wrapper)
+        self.assertIn("VM_HOSTNAME", wrapper)
+        self.assertNotIn("bootstrap.py", wrapper)
 
 
 class SeedPublicationTests(unittest.TestCase):
@@ -171,8 +150,10 @@ class SeedPublicationTests(unittest.TestCase):
             binary = local / "opaque.bin"
             original = b"\xff\x00\r\n\xc9"
             binary.write_bytes(original)
-            local_bootstrap = local / "bootstrap.py"
-            local_bootstrap.write_bytes(b"\xef\xbb\xbf#!/usr/bin/python3\r\nprint('ok')\r\n")
+            local_bootstrap = local / "bootstrap.sh"
+            local_bootstrap.write_bytes(b"\xef\xbb\xbf#!/usr/bin/bash\r\nprintf 'ok\\n'\r\n")
+            legacy_bootstrap = local / "bootstrap.py"
+            legacy_bootstrap.write_bytes(b"\xfflegacy\r\n")
             old_local = seed.LOCAL
             try:
                 seed.LOCAL = local
@@ -180,7 +161,8 @@ class SeedPublicationTests(unittest.TestCase):
             finally:
                 seed.LOCAL = old_local
             self.assertEqual(payloads["local/opaque.bin"], original)
-            self.assertEqual(payloads["local/bootstrap.py"], b"#!/usr/bin/python3\nprint('ok')\n")
+            self.assertEqual(payloads["local/bootstrap.sh"], b"#!/usr/bin/bash\nprintf 'ok\\n'\n")
+            self.assertEqual(payloads["local/bootstrap.py"], b"\xfflegacy\r\n")
 
     def test_publication_is_private_and_race_refuses_replacement(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -338,7 +320,7 @@ class HyperVSafetyTests(unittest.TestCase):
 
 class EntrypointTests(unittest.TestCase):
     def test_python_entrypoints_parse(self):
-        for path in (ROOT / "scripts/seed.py", ROOT / "scripts/kvm.py", ROOT / "scripts/hyperv.py", ROOT / "scripts/validate.py", ROOT / "assets/bootstrap.py"):
+        for path in (ROOT / "scripts/seed.py", ROOT / "scripts/kvm.py", ROOT / "scripts/hyperv.py", ROOT / "scripts/validate.py"):
             result = subprocess.run([sys.executable, str(path), "--help"], text=True, capture_output=True)
             self.assertEqual(result.returncode, 0, (path, result.stderr))
 
@@ -357,6 +339,7 @@ class EntrypointTests(unittest.TestCase):
         forbidden = list((ROOT / "scripts").glob("*.sh")) + list((ROOT / "scripts").glob("*.ps1"))
         forbidden += list((ROOT / "tests").glob("*.sh")) + list((ROOT / "tests").glob("*.ps1"))
         self.assertEqual(forbidden, [])
+        self.assertFalse((ROOT / "assets/bootstrap.py").exists())
 
 
 if __name__ == "__main__":

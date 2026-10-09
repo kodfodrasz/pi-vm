@@ -1,8 +1,9 @@
-# pi-vm Python tooling prototype
+# pi-vm host tooling and guest bootstrap
 
-This branch contains the host and guest orchestration as standalone Python
-scripts. Run them with `uv run --script`; each script carries its PEP 723
-metadata. No host Bash or PowerShell wrapper is used.
+Host orchestration remains in standalone Python scripts run with
+`uv run --script`. The Fedora guest bootstrap is Bash plus a staged GNU
+Makefile; it does not require Python to orchestrate guest setup. No host Bash
+or PowerShell wrapper is used.
 
 ## Linux / KVM
 
@@ -25,12 +26,16 @@ data can be changed with `PI_VM_CACHE`. Seed files are rendered by
 rebuilds a stopped instance; forced stop verifies the exact QEMU executable,
 exact `-drive file=` argument, and a pidfd before signalling.
 
-The guest contract remains key-only SSH, enforcing SELinux, rootless Podman,
-Samba password setup, trusted firewall sources, Pi package installation,
+The guest contract remains key-only SSH, enforcing SELinux, rootless
+Podman, Samba password setup, trusted firewall sources, Pi package installation,
 atomic bootstrap markers, and guest-generated deploy keys. First boot stages
-all seed payloads under `/opt/pi-vm`; `assets/bootstrap.py` copies installed
-configuration to `/etc/pi-vm` and installs the retry entrypoint at
-`/usr/local/sbin/pi-vm-bootstrap`.
+all seed payloads under `/opt/pi-vm`; `assets/bootstrap.sh` validates the root
+and hostname contract, installs `make` if needed, and invokes the staged
+`Makefile`. The Makefile installs durable configuration under `/etc/pi-vm` and
+installs the retry entrypoint at `/usr/local/sbin/pi-vm-bootstrap`. After a
+failure, inspect `/var/lib/pi-vm/bootstrap-failed` and rerun
+`sudo /usr/local/sbin/pi-vm-bootstrap`; a later successful retry keeps
+`recovered_from_failure=true` in the completion marker.
 
 ## Seed rendering
 
@@ -45,8 +50,11 @@ and CRLF source files are normalized before embedding. The output must not
 already exist, so an old seed is never silently replaced.
 
 Private payloads may be placed in ignored `local/`. Binary files are preserved.
-Only `local/bootstrap.py` is executable and the guest bootstrap runs it as
-root with `PI_VM_LOCAL_DIR`; do not put credentials into a self-contained ISO.
+`local/bootstrap.sh` is normalized to LF, installed mode `0700`, and run as
+root with `PI_VM_LOCAL_DIR`. A legacy `local/bootstrap.py`, if present, is
+preserved byte-for-byte as an inert payload and is not executed; migrate it to
+Bash explicitly rather than relying on the old guest Python entrypoint. Do not
+put credentials into a self-contained ISO.
 
 ## Windows / Hyper-V scope
 
@@ -68,9 +76,9 @@ readiness. These behaviors remain unrun on Linux.
 
 ## Offline checks
 
-`make test` runs the seed and validator suites. It checks seed contracts,
-`/opt/pi-vm` staging, key inventory, copied-renderer Windows source
-normalization, byte-preserved local payloads, private publication and race
-refusal, resource parsing, exact QEMU PID safety, bootstrap ownership/retry
-contracts, and Hyper-V cache locking/capacity checks. It does not download an
+`make test` runs the seed, guest Make/Bash, and validator suites. It checks
+seed contracts, `/opt/pi-vm` staging, key inventory, copied-renderer Windows
+source normalization, byte-preserved local payloads, Make dependency ordering,
+marker recovery and idempotent retries, resource parsing, exact QEMU PID
+safety, and Hyper-V cache locking/capacity checks. It does not download an
 image, start a VM, call Hyper-V, change networking, or change host dependencies.
