@@ -6,7 +6,7 @@ description: Test this Fedora Pi VM bootstrap after changes to guest assets, clo
 # Validate pi-vm
 
 The repository root is `../../..` from this skill directory. Read its `README.md`
-and `docs/validation.md` first. Resolve script paths from that root.
+first. Resolve script paths from that root.
 
 1. Check free disk space and host RAM. Never put images or large test files in
    `/tmp`. Use `build/` and the image cache. Do not delete unrelated files.
@@ -17,12 +17,10 @@ and `docs/validation.md` first. Resolve script paths from that root.
 4. Use a separate SSH known-hosts file for that VM. Wait at most five minutes
    for bootstrap. Check cloud-init status, schema, and the success marker.
    If it fails, read the log before changing anything.
-5. Run `make validate INSTANCE=ID SSH_PORT=PORT` for the guest checks. This
-   checks the real bootstrap marker, hostname `pipette` (not the instance ID),
-   fish login, key-only SSH settings, versions, root growth, Podman, SELinux,
-   and editor/shell configs. Use a trusted `--known-hosts` file when needed.
-   Add `VALIDATE_FLAGS='--nested --balloon --report build/ID/validation.json'`
-   for the optional tests and a JSON record. Never silently skip an option.
+5. Run `make validate INSTANCE=ID SSH_PORT=PORT` for the basic guest checks.
+   For optional checks and a report, run `scripts/validate.py` directly with
+   `--nested --balloon --report build/ID/validation.json`. Use a trusted
+   `--known-hosts` file when needed. Never silently skip an option.
 6. Check balloon support with QMP. Save the initial memory value, request a
    smaller value, query the result, then restore the initial value.
 7. Test nested KVM with `tests/nested-kvm.py` inside the guest. Load the stock

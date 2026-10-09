@@ -58,8 +58,8 @@ lsmod | grep -E 'hv_balloon|hv_storvsc|hv_netvsc|hv_vmbus'
 
 Expected: no cloud-init errors, a success marker, Pi 1.1.0, Starship 1.26.0,
 a root filesystem close to 8 GiB, and rootless Podman. The kernel should load
-Hyper-V storage, network, and bus drivers. The first boot may have known early
-hostname warnings; see `validation.md`. Other warnings need investigation.
+Hyper-V storage, network, and bus drivers. An early hostname warning can occur
+before systemd is available; other warnings need investigation.
 
 ## 4. Check restart and nested KVM
 

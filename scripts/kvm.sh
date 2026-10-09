@@ -59,7 +59,7 @@ validate_arguments() {
         exit 2
     fi
 
-    need python3
+    require_command python3
     local normalized
     normalized=$(python3 "$PI_VM_ROOT/scripts/kvm-process.py" validate \
         "$memory_mb" "$cpu_count" "$disk_size" "$ssh_port") || exit $?
@@ -73,7 +73,7 @@ validate_arguments() {
 }
 
 initialize_instance() {
-    need flock
+    require_command flock
     mkdir -p "$BUILD_DIR"
     exec 8>"$BUILD_DIR/.kvm.lock"
     if ! flock -n 8; then
@@ -113,7 +113,7 @@ prepare_instance_storage() {
     fi
 
     if [[ ! -f $instance_dir/disk.qcow2 ]]; then
-        space_check "$BUILD_DIR" 2000000000
+        require_free_space "$BUILD_DIR" 2000000000
         if [[ ! -f $instance_dir/seed.iso ]]; then
             "$PI_VM_ROOT/scripts/seed.sh" "$instance_id" pipette \
                 "$instance_dir/seed.iso" >/dev/null
@@ -166,9 +166,9 @@ start_instance() {
         exit 1
     fi
 
-    need qemu-img
-    need qemu-system-x86_64
-    need xorriso
+    require_command qemu-img
+    require_command qemu-system-x86_64
+    require_command xorriso
     if [[ ! -c /dev/kvm || ! -r /dev/kvm || ! -w /dev/kvm ]]; then
         echo '/dev/kvm unavailable; check BIOS virtualization, host KVM and permissions' >&2
         exit 1

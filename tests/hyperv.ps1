@@ -16,17 +16,41 @@ $script:caseDir=$null; $script:count=0
 function Assert($Condition,$Message) {if(-not $Condition){throw $Message}}
 function New-Case([bool]$Prepare=$true) {
   if($script:caseDir){Remove-Item -LiteralPath $script:caseDir -Recurse -Force}
-  $script:caseDir=Join-Path $work 'case'; New-Item -ItemType Directory -Path $script:caseDir | Out-Null
-  $script:build=Join-Path $script:caseDir 'build'; $script:cache=Join-Path $script:caseDir 'cache'
-  $script:seed=Join-Path $script:caseDir 'seed.iso'; [IO.File]::WriteAllText($script:seed,'mock ISO')
-  $script:state=@{VM=$null;Calls=[Collections.Generic.List[string]]::new();Fail='';RemoveFails=$false;StopFails=$false;LookupFails=$false;Free=100GB;SplitVolumes=$false;CacheFree=100GB;BuildFree=100GB;BaseSize=16GB;RawCorrupt=$false;Cache=$script:cache}
+  $script:caseDir=Join-Path $work 'case'
+  New-Item -ItemType Directory -Path $script:caseDir | Out-Null
+  $script:build=Join-Path $script:caseDir 'build'
+  $script:cache=Join-Path $script:caseDir 'cache'
+  $script:seed=Join-Path $script:caseDir 'seed.iso'
+  [IO.File]::WriteAllText($script:seed,'mock ISO')
+  $script:state=@{
+    VM=$null
+    Calls=[Collections.Generic.List[string]]::new()
+    Fail=''
+    RemoveFails=$false
+    StopFails=$false
+    LookupFails=$false
+    Free=100GB
+    SplitVolumes=$false
+    CacheFree=100GB
+    BuildFree=100GB
+    BaseSize=16GB
+    RawCorrupt=$false
+    Cache=$script:cache
+  }
   Set-PiVmMockState $script:state
   if($Prepare){
     New-Item -ItemType Directory -Path $script:build,$script:cache | Out-Null
-    [IO.File]::WriteAllText((Join-Path $script:cache 'Fedora-Cloud-Base-AmazonEC2-44-1.7.x86_64.raw.xz'),'mock archive')
+    $archive=Join-Path $script:cache 'Fedora-Cloud-Base-AmazonEC2-44-1.7.x86_64.raw.xz'
+    [IO.File]::WriteAllText($archive,'mock archive')
     $raw=Join-Path $script:cache 'Fedora-Cloud-Base-AmazonEC2-44-1.7.x86_64.raw'
     $file=[IO.File]::Open($raw,[IO.FileMode]::Create)
-    try {$bytes=[Text.Encoding]::ASCII.GetBytes('original');$file.Write($bytes,0,$bytes.Length);$file.SetLength(5368709120L)} finally {$file.Dispose()}
+    try {
+      $bytes=[Text.Encoding]::ASCII.GetBytes('original')
+      $file.Write($bytes,0,$bytes.Length)
+      $file.SetLength(5368709120L)
+    } finally {
+      $file.Dispose()
+    }
     # Conversion is mocked; the real fixed-VHD writer has separate content tests.
     [IO.File]::WriteAllText((Join-Path $script:build 'fedora44-base-17179869184.vhd'),'mock fixed VHD')
   }
@@ -43,10 +67,25 @@ function Expect-Failure($Pattern) {
 }
 function Assert-No-Instance {Assert (-not(Test-Path (Join-Path $script:build 'test'))) 'Failed operation left an instance directory'}
 try {
-  New-Case $false; $options.DiskSize='1GiB'; Expect-Failure 'at least 5 GiB'; Assert (-not(Test-Path $build)) 'Size preflight created build state'
-  New-Case $false; $options.SeedIso='relative.iso'; Expect-Failure 'absolute path'; Assert (-not(Test-Path $build)) 'Seed preflight created build state'
-  New-Case $false; $options.SeedIso=Join-Path $caseDir 'missing.iso'; Expect-Failure 'does not exist'; Assert (-not(Test-Path $build)) 'Missing seed created build state'
-  New-Case $false; $state.VM=[pscustomobject]@{Name='pi-vm-test';State='Running'}; Expect-Failure 'not stopped'; Assert (-not(Test-Path $build)) 'Active VM preflight mutated files'
+  New-Case $false
+  $options.DiskSize='1GiB'
+  Expect-Failure 'at least 5 GiB'
+  Assert (-not(Test-Path $build)) 'Size preflight created build state'
+
+  New-Case $false
+  $options.SeedIso='relative.iso'
+  Expect-Failure 'absolute path'
+  Assert (-not(Test-Path $build)) 'Seed preflight created build state'
+
+  New-Case $false
+  $options.SeedIso=Join-Path $caseDir 'missing.iso'
+  Expect-Failure 'does not exist'
+  Assert (-not(Test-Path $build)) 'Missing seed created build state'
+
+  New-Case $false
+  $state.VM=[pscustomobject]@{Name='pi-vm-test';State='Running'}
+  Expect-Failure 'not stopped'
+  Assert (-not(Test-Path $build)) 'Active VM preflight mutated files'
   $options.Force=$true; Expect-Failure 'Force cannot replace'; Assert ($state.Calls.Count -eq 0) 'Force changed a registered VM'
   New-Case $false; $state.VM=[pscustomobject]@{Name='pi-vm-test';State='Off'}; Expect-Failure 'incomplete'
   New-Case $false; $state.Fail='switch'; Expect-Failure 'switch'; Assert (-not(Test-Path $build)) 'Missing switch created build state'
@@ -101,7 +140,11 @@ try {
   try {$null=$file.Read($bytes,0,8)} finally {$file.Dispose()}
   Assert ([Text.Encoding]::ASCII.GetString($bytes) -eq 'candidat') 'Validated raw replacement was not published'
 
-  New-Case; Remove-Item (Join-Path $cache 'Fedora-Cloud-Base-AmazonEC2-44-1.7.x86_64.raw.xz'); $state.Fail='archive-hash'; Expect-Failure 'Compressed image'
+  New-Case
+  $archive=Join-Path $cache 'Fedora-Cloud-Base-AmazonEC2-44-1.7.x86_64.raw.xz'
+  Remove-Item $archive
+  $state.Fail='archive-hash'
+  Expect-Failure 'Compressed image'
   Assert (-not(Get-ChildItem $cache -Filter '.download-*')) 'Failed download scratch survived'
   $state.Fail=''; & $scriptPath @options
   Assert ($state.Calls.Contains('download')) 'Download mock was not exercised'

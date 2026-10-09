@@ -51,7 +51,11 @@ class ValidatorTests(unittest.TestCase):
                   {'status': 'done', 'errors': ['failure'], 'recoverable_errors': {}},
                   {'status': 'done', 'errors': [], 'recoverable_errors': {'WARNING': ['network failed']}},
                   {'status': 'done', 'errors': [], 'recoverable_errors': None},
-                  {'status': 'done', 'errors': [], 'recoverable_errors': {'WARNING': ['Failed to set the hostname to pipette (pipette); package setup failed']}}]
+                  {'status': 'done', 'errors': [], 'recoverable_errors': {
+                      'WARNING': [
+                          'Failed to set the hostname to pipette (pipette); package setup failed'
+                      ]
+                  }}]
         for cloud in clouds:
             data = good()
             data['cloud'] = cloud
@@ -91,6 +95,14 @@ class ValidatorTests(unittest.TestCase):
             with patch.object(v, 'ssh', return_value=subprocess.CompletedProcess([], 0, output, '')):
                 with self.subTest(output=output), self.assertRaises(v.Failure):
                     v.collect(2222, Path('known'), 1)
+
+    def test_bootstrap_failure_is_reported_immediately(self):
+        reply = subprocess.CompletedProcess(
+            [], 0, '{"ready":false,"bootstrap_failure":"line=42\\nstatus=1"}', '')
+        with patch.object(v, 'ssh', return_value=reply), patch.object(v.time, 'sleep') as sleep:
+            with self.assertRaisesRegex(v.Failure, 'guest bootstrap failed.*line=42'):
+                v.collect(2222, Path('known'), 10)
+        sleep.assert_not_called()
 
     def test_marker_wait_then_success(self):
         replies = [subprocess.CompletedProcess([], 0, '{"ready":false}', ''),

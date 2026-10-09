@@ -152,6 +152,16 @@ class ProcessTests(unittest.TestCase):
                 self.assertFalse((self.root/'build').exists())
                 self.assertFalse((self.root/'cache').exists())
 
+    def test_make_instance_is_data_not_shell_syntax(self):
+        marker = self.root/'injected'
+        instance = f"x'; touch {marker}; #'"
+        env = dict(os.environ, PI_VM_BUILD=str(self.root/'build'))
+        result = subprocess.run(
+            ['make', '-s', 'kvm-status', 'INSTANCE=' + instance],
+            cwd=ROOT, env=env, text=True, capture_output=True, timeout=10)
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertFalse(marker.exists())
+
     def test_comma_build_path_rejected_before_writes(self):
         build = self.root/'comma,build'
         self.assertEqual(self.shell('status', 'test', build=build).returncode, 2)

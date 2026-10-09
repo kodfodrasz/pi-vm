@@ -15,8 +15,15 @@ ROOT = Path(__file__).resolve().parent.parent
 
 REMOTE = r'''
 import json, os, pathlib, pwd, subprocess, time, uuid
-marker = pathlib.Path('/var/lib/pi-vm/bootstrap-complete')
-if not marker.is_file():
+success_marker = pathlib.Path('/var/lib/pi-vm/bootstrap-complete')
+failure_marker = pathlib.Path('/var/lib/pi-vm/bootstrap-failed')
+if failure_marker.exists():
+    print(json.dumps({
+        'ready': False,
+        'bootstrap_failure': failure_marker.read_text().strip()
+    }))
+    raise SystemExit(0)
+if not success_marker.is_file():
     print(json.dumps({'ready': False}))
     raise SystemExit(0)
 def run(argv):
@@ -125,6 +132,8 @@ def collect(port, hosts, wait_seconds, instance_id=None):
                     raise Failure('guest returned malformed JSON') from exc
                 if not isinstance(data, dict) or type(data.get('ready')) is not bool:
                     raise Failure('guest readiness metadata is missing or malformed')
+                if data.get('bootstrap_failure'):
+                    raise Failure('guest bootstrap failed: ' + str(data['bootstrap_failure']))
                 if data['ready']:
                     return data
             elif result.returncode != 255:
@@ -134,38 +143,64 @@ def collect(port, hosts, wait_seconds, instance_id=None):
 
 
 def check_metadata(data, hostname, disk_bytes, instance_id='pipette'):
-    def need(condition, message):
+    def require(condition, message):
         if not condition:
             raise Failure(message)
-    need(data.get('ready') is True, 'bootstrap marker missing')
-    need(data.get('user') == 'pi', 'unexpected guest user')
-    need(isinstance(data.get('shell'), str) and Path(data['shell']).name == 'fish',
-         'pi login shell is not fish')
-    need(data.get('hostname') == hostname, 'guest hostname mismatch')
-    need(data.get('instance_id') == instance_id, 'guest instance ID mismatch (check SSH port)')
+
+    require(data.get('ready') is True, 'bootstrap marker missing')
+    require(data.get('user') == 'pi', 'unexpected guest user')
+    require(
+        isinstance(data.get('shell'), str) and Path(data['shell']).name == 'fish',
+        'pi login shell is not fish'
+    )
+    require(data.get('hostname') == hostname, 'guest hostname mismatch')
+    require(
+        data.get('instance_id') == instance_id,
+        'guest instance ID mismatch (check SSH port)'
+    )
+
     cloud = data.get('cloud')
-    need(isinstance(cloud, dict) and cloud.get('status') == 'done', 'cloud-init not done')
-    need(cloud.get('errors') == [], 'cloud-init errors are present or missing')
+    require(
+        isinstance(cloud, dict) and cloud.get('status') == 'done',
+        'cloud-init not done'
+    )
+    require(cloud.get('errors') == [], 'cloud-init errors are present or missing')
     warnings = cloud.get('recoverable_errors')
-    need(isinstance(warnings, dict), 'cloud-init warning metadata missing')
+    require(isinstance(warnings, dict), 'cloud-init warning metadata missing')
     for category, messages in warnings.items():
-        need(category == 'WARNING' and isinstance(messages, list), 'unexpected cloud-init warning category')
+        require(
+            category == 'WARNING' and isinstance(messages, list),
+            'unexpected cloud-init warning category'
+        )
         for message in messages:
-            need(message == f'Failed to set the hostname to {hostname} ({hostname})',
-                'unexpected cloud-init warning')
-    need(data.get('pi') == '1.1.0', 'Pi version is not 1.1.0')
-    need(data.get('starship') == 'starship 1.26.0', 'Starship version is not 1.26.0')
-    need(data.get('rootless') is True, 'Podman is not rootless')
-    need(data.get('selinux') == 'Enforcing', 'SELinux is not enforcing')
-    need(data.get('balloon_driver') is True, 'virtio balloon driver missing')
-    need(data.get('configs') is True, 'editor or shell config check missing')
-    auth = data.get('sshd')
-    need(isinstance(auth, dict) and auth.get('passwordauthentication') == 'no'
-         and auth.get('kbdinteractiveauthentication') == 'no', 'SSH password authentication enabled or missing')
+            require(
+                message == f'Failed to set the hostname to {hostname} ({hostname})',
+                'unexpected cloud-init warning'
+            )
+
+    require(data.get('pi') == '1.1.0', 'Pi version is not 1.1.0')
+    require(data.get('starship') == 'starship 1.26.0', 'Starship version is not 1.26.0')
+    require(data.get('rootless') is True, 'Podman is not rootless')
+    require(data.get('selinux') == 'Enforcing', 'SELinux is not enforcing')
+    require(data.get('balloon_driver') is True, 'virtio balloon driver missing')
+    require(data.get('configs') is True, 'editor or shell config check missing')
+
+    sshd = data.get('sshd')
+    require(
+        isinstance(sshd, dict)
+        and sshd.get('passwordauthentication') == 'no'
+        and sshd.get('kbdinteractiveauthentication') == 'no',
+        'SSH password authentication enabled or missing'
+    )
     root_bytes = data.get('root_bytes')
-    need(type(root_bytes) is int and type(disk_bytes) is int and disk_bytes > 0,
-         'disk/root size metadata malformed')
-    need(root_bytes * 100 >= disk_bytes * 85, 'root filesystem is under 85% of virtual disk size')
+    require(
+        type(root_bytes) is int and type(disk_bytes) is int and disk_bytes > 0,
+        'disk/root size metadata malformed'
+    )
+    require(
+        root_bytes * 100 >= disk_bytes * 85,
+        'root filesystem is under 85% of virtual disk size'
+    )
     return warnings
 
 
@@ -266,7 +301,12 @@ def validate(args):
               'root_bytes': data['root_bytes'], 'hostname': data['hostname'],
               'cloud_init_warnings': warnings, 'configs': True, 'rootless': True}
     if args.nested:
-        code = "import pathlib,subprocess\ncpu=pathlib.Path('/proc/cpuinfo').read_text()\nsubprocess.run(['modprobe','kvm_amd' if 'svm' in cpu else 'kvm_intel'],check=True)\n"
+        code = """import pathlib
+import subprocess
+cpu_info = pathlib.Path('/proc/cpuinfo').read_text()
+module = 'kvm_amd' if 'svm' in cpu_info else 'kvm_intel'
+subprocess.run(['modprobe', module], check=True)
+"""
         code += (ROOT/'tests/nested-kvm.py').read_text()
         result = ssh(args.ssh_port, hosts, code, command='sudo -n python3 -', timeout=30)
         if result.returncode or 'PASS: nested KVM executed an L2 halt instruction' not in result.stdout:

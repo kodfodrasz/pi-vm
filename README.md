@@ -91,27 +91,26 @@ pi --version
 podman info --format '{{.Host.Security.Rootless}}'
 ```
 
-The bootstrap success marker is written only after the full install succeeds. Cloud-init does
-not rerun the entire install on every reboot. The same ISO and instance ID stay
-with each disk. Fedora's first boot may report recoverable early hostname
-warnings; bootstrap sets the name later. Check the marker and `errors` field.
-The tested guest had clean cloud-init status after its first normal restart. If a new test VM reuses an SSH port, use a separate SSH known-hosts
-file. Do not blindly disable host-key checks on a reused port.
+The bootstrap writes `/var/lib/pi-vm/bootstrap-complete` only after the full
+install succeeds. On failure it writes `/var/lib/pi-vm/bootstrap-failed`; the
+validator reports that file without waiting for a timeout. Cloud-init does not
+rerun the install after a reboot. After fixing a transient network problem, retry
+inside the guest with:
+
+```sh
+sudo env VM_HOSTNAME=YOUR_HOSTNAME /usr/local/sbin/pi-vm-bootstrap
+```
+
+Use the hostname originally chosen for the VM (`pipette` by default). Fedora may report an early hostname warning before systemd is available. The
+bootstrap sets the hostname later. Other cloud-init errors need investigation.
+If a new VM reuses an SSH port, use a separate known-hosts file. Do not disable
+host-key checks.
 
 Host logs are `build/ID/serial.log` and `build/ID/qemu.log`. VM control uses a
 local QMP socket in the same directory. Treat your build directory as private.
 
-Process checks require the QEMU executable and an exact disk argument, not
-just matching words in a command line. Forced stop uses a Linux PID handle,
-which prevents a recycled PID from receiving the signal. It refuses to stop
-if that API is unavailable; there is no unsafe numeric-PID fallback. Graceful
-stop still uses QMP. Neither stop mode deletes disks.
-
-Resource values are decimal, including values with leading zeros. The launcher
-accepts 512 MiB–1 TiB RAM, 1–1024 CPUs, and 5 GiB–64 TiB disks (`G` or `M`
-suffixes). These are input limits, not a promise that your host has that much
-capacity. Build paths can contain spaces, but not commas or line breaks, which
-would change QEMU option parsing. Instance directories cannot be symlinks.
+Forced stop verifies the QEMU executable and exact disk path before signalling
+the process. Graceful and forced stops preserve the disk.
 
 ### Storage
 
@@ -185,21 +184,15 @@ line endings at LF, and the renderer normalizes UTF-8 BOMs and CRLF before
 embedding Linux files. Changing an ISO does not rerun
 cloud-init on an old disk. Open the console with `vmconnect.exe localhost pi-vm-pipette`.
 
-**Windows IMAPI2FS and actual Hyper-V deployment still need manual testing.**
-PowerShell syntax, the C# stream helper, and VHD disk format/content were checked
-on Linux. Those checks are not a Windows deployment test. Follow
-`docs/hyperv-manual-test.md` for the remaining host and guest checks.
+A real Windows host is still required to verify IMAPI2FS and Hyper-V behavior.
+Follow `docs/hyperv-manual-test.md`.
 
 ## Checks and repeatability
 
-`make test` checks shell syntax, seed keys and embedded files, fish syntax when
-available, PowerShell parsing and C# compilation when available, and VHD footer
-fields/content with `pwsh` and `qemu-img`. With `pwsh`, it also runs 25 isolated
-Hyper-V orchestration cases using command doubles. They check ordering, cache
-replacement, restart, failed creation, and disk preservation. They use no real
-Hyper-V commands or network. The whole test suite downloads nothing and boots
-no VM.
-The 5 GiB VHD test runs only when enough disk space is available.
+`make test` runs offline checks for shell, Python, rendered seeds, KVM process
+handling, PowerShell, and VHD conversion. It does not download an image or boot
+a VM. PowerShell and VHD checks run only when their host tools are available;
+the large VHD case also requires enough free disk space.
 
 ### Check a running KVM guest
 
@@ -216,7 +209,8 @@ is rejected for manual `Match Host` verification.
 
 ```sh
 make validate INSTANCE=pipette
-make validate INSTANCE=pipette VALIDATE_FLAGS='--nested --balloon --report build/pipette/validation.json'
+python3 scripts/validate.py --instance pipette --nested --balloon \
+    --report build/pipette/validation.json
 ```
 
 The default check does not change memory or install software. `--nested` runs
@@ -228,15 +222,14 @@ failure prints the original byte count for manual recovery.
 SSH uses a per-instance known-hosts file at `build/ID/known_hosts`. It accepts a
 first key but rejects changed keys. Authentication uses your normal OpenSSH
 agent or identity files; the validator does not inspect or copy key material.
-Use `VALIDATE_FLAGS='--known-hosts /absolute/path'`
-for an existing trusted file. JSON reports must stay inside that instance's
+Pass `--known-hosts /absolute/path` directly to `scripts/validate.py` when you
+already have a trusted file. JSON reports must stay inside that instance's
 build directory. A failed check exits nonzero; optional flags never silently
 skip their tests. Use `SSH_PORT=2223` for a VM on another port. The expected
 hostname is `pipette`, not the instance ID; `--hostname` changes that check.
 
 `tests/nested-kvm.py` runs a tiny L2 guest inside a test VM. It needs root and
-the stock KVM kernel module, not a QEMU package. See `docs/validation.md` for
-runtime test results and commands.
+the stock KVM kernel module, not a QEMU package.
 
 The source is Fedora Cloud Base AmazonEC2 **44-1.7** from Fedora's release mirrors.
 This raw image was tested with NoCloud on KVM in BIOS and UEFI modes. Both the

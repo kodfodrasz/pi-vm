@@ -1,32 +1,71 @@
 #!/usr/bin/env python3
-"""Run one halt instruction in a nested KVM guest, with no QEMU install.
-
-Run inside the test VM as root. This is a diagnostic, not guest software.
-"""
+"""Run one halt instruction in a nested KVM guest without installing QEMU."""
 import ctypes
 import fcntl
 import mmap
 import os
 import struct
 
-kvm = os.open('/dev/kvm', os.O_RDWR)
-assert fcntl.ioctl(kvm, 0xAE00, 0) == 12, 'KVM API mismatch'
-vm = fcntl.ioctl(kvm, 0xAE01, 0)
-memory = mmap.mmap(-1, 4096)
-memory[0] = 0xF4  # HLT in real mode
-address = ctypes.addressof(ctypes.c_char.from_buffer(memory))
-fcntl.ioctl(vm, 0x4020AE46, struct.pack('IIQQQ', 0, 0, 0, 4096, address))
-vcpu = fcntl.ioctl(vm, 0xAE41, 0)
-sregs = bytearray(312)
-fcntl.ioctl(vcpu, 0x8138AE83, sregs)
-struct.pack_into('Q', sregs, 0, 0)  # CS base
-struct.pack_into('H', sregs, 12, 0)  # CS selector
-fcntl.ioctl(vcpu, 0x4138AE84, sregs)
-regs = [0] * 18
-regs[17] = 2  # mandatory RFLAGS bit
-fcntl.ioctl(vcpu, 0x4090AE82, struct.pack('18Q', *regs))
-run = mmap.mmap(vcpu, fcntl.ioctl(kvm, 0xAE04, 0))
-fcntl.ioctl(vcpu, 0xAE80, 0)
-reason = struct.unpack_from('I', run, 8)[0]
-assert reason == 5, f'Expected KVM_EXIT_HLT, got {reason}'
-print('PASS: nested KVM executed an L2 halt instruction')
+KVM_GET_API_VERSION = 0xAE00
+KVM_CREATE_VM = 0xAE01
+KVM_GET_VCPU_MMAP_SIZE = 0xAE04
+KVM_SET_USER_MEMORY_REGION = 0x4020AE46
+KVM_CREATE_VCPU = 0xAE41
+KVM_GET_SREGS = 0x8138AE83
+KVM_SET_SREGS = 0x4138AE84
+KVM_SET_REGS = 0x4090AE82
+KVM_RUN = 0xAE80
+KVM_EXIT_HLT = 5
+
+
+def main():
+    kvm = os.open('/dev/kvm', os.O_RDWR)
+    vm = None
+    vcpu = None
+    memory = None
+    run_state = None
+    try:
+        version = fcntl.ioctl(kvm, KVM_GET_API_VERSION, 0)
+        if version != 12:
+            raise RuntimeError(f'Expected KVM API version 12, got {version}')
+
+        vm = fcntl.ioctl(kvm, KVM_CREATE_VM, 0)
+        memory = mmap.mmap(-1, 4096)
+        memory[0] = 0xF4  # HLT in real mode
+        address = ctypes.addressof(ctypes.c_char.from_buffer(memory))
+        region = struct.pack('IIQQQ', 0, 0, 0, 4096, address)
+        fcntl.ioctl(vm, KVM_SET_USER_MEMORY_REGION, region)
+
+        vcpu = fcntl.ioctl(vm, KVM_CREATE_VCPU, 0)
+        special_registers = bytearray(312)
+        fcntl.ioctl(vcpu, KVM_GET_SREGS, special_registers)
+        struct.pack_into('Q', special_registers, 0, 0)  # CS base
+        struct.pack_into('H', special_registers, 12, 0)  # CS selector
+        fcntl.ioctl(vcpu, KVM_SET_SREGS, special_registers)
+
+        registers = [0] * 18
+        registers[17] = 2  # Mandatory RFLAGS bit.
+        fcntl.ioctl(vcpu, KVM_SET_REGS, struct.pack('18Q', *registers))
+
+        mapping_size = fcntl.ioctl(kvm, KVM_GET_VCPU_MMAP_SIZE, 0)
+        run_state = mmap.mmap(vcpu, mapping_size)
+        fcntl.ioctl(vcpu, KVM_RUN, 0)
+        exit_reason = struct.unpack_from('I', run_state, 8)[0]
+        if exit_reason != KVM_EXIT_HLT:
+            raise RuntimeError(f'Expected KVM_EXIT_HLT, got {exit_reason}')
+    finally:
+        if run_state is not None:
+            run_state.close()
+        if vcpu is not None:
+            os.close(vcpu)
+        if memory is not None:
+            memory.close()
+        if vm is not None:
+            os.close(vm)
+        os.close(kvm)
+
+    print('PASS: nested KVM executed an L2 halt instruction')
+
+
+if __name__ == '__main__':
+    main()
