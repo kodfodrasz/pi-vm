@@ -169,6 +169,11 @@ class GuestMakeTests(unittest.TestCase):
             fake_bin.mkdir()
             calls = root / "calls"
             attempt = root / "dnf-attempt"
+            fake_make_source = root / "fake-make"
+            fake_make_source.write_text(
+                "#!/usr/bin/bash\n"
+                "printf '%s\\n' \"$VM_HOSTNAME\" >> \"$PI_CALLS\"\n"
+            )
             fake = fake_bin / "fake-command"
             fake.write_text(
                 "#!/usr/bin/bash\n"
@@ -178,13 +183,13 @@ class GuestMakeTests(unittest.TestCase):
                 "  hostname) printf system-old\\n ;;\n"
                 "  id) exit 0 ;;\n"
                 "  dnf) if [[ ! -e $PI_DNF_ATTEMPT ]]; then : > $PI_DNF_ATTEMPT; exit 1; fi\n"
-                "    printf '#!/usr/bin/bash\\nprintf \\\'%s\\\\n\\\' \\\"$VM_HOSTNAME\\\" >> \\\"$PI_CALLS\\\"\\n' > $PI_FAKE_BIN/make\n"
+                "    cp -- \"$PI_FAKE_MAKE_SOURCE\" \"$PI_FAKE_BIN/make\"\n"
                 "    chmod 0755 $PI_FAKE_BIN/make ;;\n"
                 "esac\n"
             )
             fake.chmod(0o755)
-            for command in ("hostnamectl", "hostname", "id", "dnf", "install", "chmod", "mktemp", "tee", "mv", "rm"):
-                (fake_bin / command).symlink_to(fake if command not in ("install", "chmod", "mktemp", "tee", "mv", "rm") else f"/usr/bin/{command}")
+            for command in ("hostnamectl", "hostname", "id", "dnf", "install", "chmod", "mktemp", "tee", "mv", "rm", "cp"):
+                (fake_bin / command).symlink_to(fake if command not in ("install", "chmod", "mktemp", "tee", "mv", "rm", "cp") else f"/usr/bin/{command}")
             environment = {
                 **os.environ,
                 "PATH": str(fake_bin),
@@ -195,10 +200,11 @@ class GuestMakeTests(unittest.TestCase):
                 "PI_DNF_ATTEMPT": str(attempt),
                 "PI_CALLS": str(calls),
                 "PI_FAKE_BIN": str(fake_bin),
+                "PI_FAKE_MAKE_SOURCE": str(fake_make_source),
             }
             first = subprocess.run([str(WRAPPER)], env=environment, text=True, capture_output=True)
             self.assertNotEqual(first.returncode, 0)
-            self.assertEqual((root / "state" / "hostname").read_text(), "seeded-name\\n")
+            self.assertEqual((root / "state" / "hostname").read_text(), "seeded-name\n")
             self.assertTrue((root / "retry-wrapper").is_file())
             environment.pop("VM_HOSTNAME")
             second = subprocess.run([str(root / "retry-wrapper")], env=environment, text=True, capture_output=True)
