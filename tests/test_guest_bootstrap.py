@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 import pty
 import select
+import sys
 import time
 from pathlib import Path
 import shutil
@@ -50,6 +51,17 @@ class GuestMakeTests(unittest.TestCase):
             root = Path(directory)
             stage = root / "stage"
             shutil.copytree(ROOT / "assets", stage)
+            # Redirect the production default, not an AZURE_STATE override.
+            # This exercises its definition without touching real root paths.
+            default_azure_state = "AZURE_STATE ?= /var/lib/waagent\n"
+            make_source = MAKEFILE.read_text()
+            self.assertIn(default_azure_state, make_source)
+            azure_state = root / "var" / "lib" / "waagent"
+            azure_state.mkdir(parents=True)
+            (azure_state / "stale-agent-state").write_text("offline fixture\n")
+            fixture_makefile = stage / "Makefile"
+            fixture_makefile.write_text(make_source.replace(
+                default_azure_state, f"AZURE_STATE ?= {azure_state}\n"))
             local_source = stage / "local" / "nested"
             local_source.mkdir(parents=True)
             local_source.chmod(0o755)
@@ -71,6 +83,7 @@ class GuestMakeTests(unittest.TestCase):
                 "  getent) printf 'dev:x:1000:1000::%s:/bin/bash\\n' \"$PI_FAKE_HOME\" ;;\n"
                 "  pdbedit) [[ -e $PI_FAKE_ACCOUNT ]] ;;\n"
                 "  smbpasswd) cat > \"$PI_FAKE_ACCOUNT\" ;;\n"
+                "  chown) if [[ ${@: -1} == \"$PI_FAKE_HOME/samba-initial-password\" ]]; then printf '%s\\n' \"$1\" > \"$PI_FAKE_PASSWORD_OWNER\"; fi ;;\n"
                 "  firewall-cmd) case $* in\n"
                 "    *--get-ipsets*) cat \"$PI_FAKE_SETS\" 2>/dev/null || true ;;\n"
                 "    *--new-ipset=*) for arg in \"$@\"; do [[ $arg != --new-ipset=* ]] || printf '%s ' \"${arg#--new-ipset=}\" >> \"$PI_FAKE_SETS\"; done ;;\n"
@@ -120,6 +133,7 @@ class GuestMakeTests(unittest.TestCase):
                 "PI_USER": "dev",
                 "PI_FAKE_HOME": str(home),
                 "PI_FAKE_ACCOUNT": str(root / "samba-account"),
+                "PI_FAKE_PASSWORD_OWNER": str(root / "password-owner"),
                 "PI_FAKE_SETS": str(root / "ipsets"),
                 "PI_FAKE_RULES": str(root / "rules"),
                 "SELINUX_CONFIG": str(selinux),
@@ -140,15 +154,15 @@ class GuestMakeTests(unittest.TestCase):
                 "SUBUID_FILE": str(root / "etc" / "subuid"),
                 "SUBGID_FILE": str(root / "etc" / "subgid"),
                 "AZURE_CONFIG": str(root / "etc" / "waagent.conf"),
-                "AZURE_STATE": str(root / "var" / "lib" / "waagent"),
                 "AZURE_LOG": str(root / "var" / "log" / "waagent.log"),
                 "STARSHIP_BIN": str(root / "usr" / "local" / "bin" / "starship"),
                 "BOOTSTRAP_BIN": str(root / "usr" / "local" / "sbin" / "pi-vm-bootstrap"),
                 "VM_HOSTNAME": "offline-test",
             }
             environment = {**os.environ, **variables}
+            environment.pop("AZURE_STATE", None)
             (root / "fail-dnf").touch()
-            failed = subprocess.run(["make", "-j4", "--no-print-directory", "-f", str(MAKEFILE), "bootstrap"],
+            failed = subprocess.run(["make", "-j4", "--no-print-directory", "-f", str(fixture_makefile), "bootstrap"],
                                     env=environment, text=True, capture_output=True)
             self.assertNotEqual(failed.returncode, 0)
             retry = root / "usr" / "local" / "sbin" / "pi-vm-bootstrap"
@@ -162,16 +176,20 @@ class GuestMakeTests(unittest.TestCase):
             # Recover an interrupted account creation using the saved password.
             saved_password = home / "samba-initial-password"
             saved_password.write_text("interrupted-password\n")
-            saved_password.chmod(0o600)
+            saved_password.chmod(0o644)
+            (root / "password-owner").write_text("root:root\n")
             (root / "ipsets").write_text("manual_set ")
             (root / "rules").write_text("manual-rule\n")
             for pass_name in ("retry-1", "retry-2"):
                 environment["PI_FAKE_PASS"] = pass_name
-                result = subprocess.run(["make", "-j4", "--no-print-directory", "-f", str(MAKEFILE), "bootstrap"],
+                result = subprocess.run(["make", "-j4", "--no-print-directory", "-f", str(fixture_makefile), "bootstrap"],
                                         env=environment, text=True, capture_output=True)
                 self.assertEqual(result.returncode, 0, result.stderr + result.stdout + fake_log.read_text())
                 self.assertEqual("password: interrupted-password" in result.stdout, pass_name == "retry-1")
                 if pass_name == "retry-1":
+                    self.assertEqual(saved_password.stat().st_mode & 0o777, 0o600)
+                    self.assertEqual((root / "password-owner").read_text(), "dev:staff\n")
+                    self.assertFalse(azure_state.exists(), "default Azure state must be removed")
                     self.assertLess(result.stdout.index("password: interrupted-password"),
                                     result.stdout.index("SAMBA_SERVICE_START"))
                     readme = (home / "README.md").read_text()
@@ -220,7 +238,7 @@ class GuestMakeTests(unittest.TestCase):
             (root / "samba-account").unlink()
             saved_password.unlink()
             environment["PI_FAKE_PASS"] = "new-account"
-            generated = subprocess.run(["make", "-j4", "--no-print-directory", "-f", str(MAKEFILE), "bootstrap"],
+            generated = subprocess.run(["make", "-j4", "--no-print-directory", "-f", str(fixture_makefile), "bootstrap"],
                                        env=environment, text=True, capture_output=True)
             self.assertEqual(generated.returncode, 0, generated.stderr)
             self.assertEqual(saved_password.read_text(), "0123456789abcdef\n")
@@ -230,14 +248,62 @@ class GuestMakeTests(unittest.TestCase):
                                 for line in fake_log.read_text().splitlines()))
             self.assertIn(f"saved in: {saved_password}", generated.stdout)
 
+            # Existing Samba accounts keep their password, even when the saved
+            # initial value has been replaced by the owner since provisioning.
+            (root / "samba-account").write_text("rotated-account-password\n" * 2)
+            saved_password.write_text("rotated-owner-value\n")
+            saved_password.chmod(0o644)
+            (root / "password-owner").write_text("other:other\n")
+            environment["PI_FAKE_PASS"] = "existing-account"
+            existing = subprocess.run(["make", "-j4", "--no-print-directory", "-f", str(fixture_makefile), "bootstrap"],
+                                      env=environment, text=True, capture_output=True)
+            self.assertEqual(existing.returncode, 0, existing.stderr)
+            self.assertEqual(saved_password.read_text(), "rotated-owner-value\n")
+            self.assertEqual(saved_password.stat().st_mode & 0o777, 0o600)
+            self.assertEqual((root / "password-owner").read_text(), "dev:staff\n")
+            self.assertEqual((root / "samba-account").read_text(), "rotated-account-password\n" * 2)
+            self.assertNotIn("Samba initial login", existing.stdout)
+            self.assertFalse(any(":existing-account:smbpasswd:" in line for line in fake_log.read_text().splitlines()))
+
+            # Reject symlinks (including dangling ones) and nonregular paths
+            # before changing or reading them, regardless of account existence.
+            target = root / "password-target"
+            target.write_text("untouched-target\n")
+            target.chmod(0o644)
+            saved_password.unlink()
+            for account_exists in (True, False):
+                if not account_exists:
+                    (root / "samba-account").unlink()
+                for kind in ("symlink", "dangling-symlink", "directory"):
+                    with self.subTest(account_exists=account_exists, password_path=kind):
+                        if kind == "directory":
+                            saved_password.mkdir()
+                        else:
+                            saved_password.symlink_to(target if kind == "symlink" else root / "absent-target")
+                        environment["PI_FAKE_PASS"] = "reject-credential"
+                        rejected = subprocess.run(["make", "-j4", "--no-print-directory", "-f", str(fixture_makefile), "bootstrap"],
+                                                  env=environment, text=True, capture_output=True)
+                        self.assertNotEqual(rejected.returncode, 0)
+                        self.assertIn("Refusing nonregular Samba password path", rejected.stderr)
+                        self.assertNotIn("Samba initial login", rejected.stdout)
+                        if kind == "directory":
+                            saved_password.rmdir()
+                        else:
+                            saved_password.unlink()
+            self.assertEqual(target.read_text(), "untouched-target\n")
+            self.assertEqual(target.stat().st_mode & 0o777, 0o644)
+            rejected_commands = [line for line in fake_log.read_text().splitlines() if ":reject-credential:" in line]
+            self.assertFalse(any(":smbpasswd:" in line or ":openssl:" in line for line in rejected_commands))
+            self.assertFalse(any(":chown:" in line and str(saved_password) in line for line in rejected_commands))
+
             environment["PI_FAKE_MISSING_USER"] = "1"
-            missing = subprocess.run(["make", "--no-print-directory", "-f", str(MAKEFILE), "bootstrap"],
+            missing = subprocess.run(["make", "--no-print-directory", "-f", str(fixture_makefile), "bootstrap"],
                                      env=environment, text=True, capture_output=True)
             self.assertNotEqual(missing.returncode, 0)
             self.assertIn("Cloud-init must create account dev", missing.stderr)
             environment.pop("PI_FAKE_MISSING_USER")
             environment["PI_USER"] = "dev;touch /tmp/not-allowed"
-            invalid = subprocess.run(["make", "--no-print-directory", "-f", str(MAKEFILE), "bootstrap"],
+            invalid = subprocess.run(["make", "--no-print-directory", "-f", str(fixture_makefile), "bootstrap"],
                                      env=environment, text=True, capture_output=True)
             self.assertNotEqual(invalid.returncode, 0)
 
@@ -432,6 +498,39 @@ class PersonalBootstrapTests(unittest.TestCase):
             (home / ".readme-dismissed").unlink()
             (home / "README.md").write_text("# Unrelated README without sentinel\n")
             self.assertEqual(subprocess.check_output(["sh", str(script)], env=environment), b"")
+
+    def test_readme_wall_keeps_one_snapshot_during_atomic_replacement(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            readme = home / "README.md"
+            readme.write_text("# Original intro\n<!-- END_OF_WALL_MESSAGE -->\noriginal-detail\n")
+            replacement = home / "replacement.md"
+            replacement.write_text("# Markerless replacement\nreplacement-detail\n")
+            binaries = home / "bin"
+            binaries.mkdir()
+            # Open the input, replace its pathname atomically, then let real
+            # awk consume that open snapshot with the production program.
+            (binaries / "awk").write_text(
+                f"#!{sys.executable}\nimport os, sys\n"
+                "fd = os.open(sys.argv[-1], os.O_RDONLY)\n"
+                "os.set_inheritable(fd, True)\n"
+                "os.replace(os.environ['README_REPLACEMENT'], sys.argv[-1])\n"
+                "sys.argv[-1] = '/proc/self/fd/' + str(fd)\n"
+                "os.execv('/usr/bin/awk', ['awk', *sys.argv[1:]])\n")
+            # A second content reader must not gate a later read of another
+            # inode. The original grep+awk implementation fails this test.
+            (binaries / "grep").write_text("#!/bin/sh\necho 'unexpected extra README reader' >&2\nexit 1\n")
+            for binary in binaries.iterdir():
+                binary.chmod(0o755)
+            result = subprocess.run(
+                ["sh", str(ROOT / "assets/config/readme-wall.sh")],
+                env={**os.environ, "HOME": str(home), "README_REPLACEMENT": str(replacement),
+                     "PATH": f"{binaries}:{os.environ['PATH']}"},
+                text=True, capture_output=True, timeout=5)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout, "# Original intro\n")
+            self.assertEqual(result.stderr, "")
+            self.assertEqual(readme.read_text(), "# Markerless replacement\nreplacement-detail\n")
 
     def test_bash_and_fish_only_greet_interactive_logins(self):
         with tempfile.TemporaryDirectory() as directory:

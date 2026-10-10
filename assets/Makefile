@@ -18,8 +18,7 @@ SHELLS_FILE ?= /etc/shells
 SUBUID_FILE ?= /etc/subuid
 SUBGID_FILE ?= /etc/subgid
 AZURE_CONFIG ?= /etc/waagent.conf
-AZURE_SELINUX_CONFIG ?= /etc/selinux/config
-STATE ?= /var/lib/waagent
+AZURE_STATE ?= /var/lib/waagent
 AZURE_LOG ?= /var/log/waagent.log
 
 STARSHIP_URL ?= https://github.com/starship/starship/releases/download/v1.26.0/starship-x86_64-unknown-linux-musl.tar.gz
@@ -201,6 +200,14 @@ configure-file-sharing:
 	done
 	firewall-cmd --reload
 	password_file=$$PI_HOME/samba-initial-password
+	if [[ -L $$password_file || ( -e $$password_file && ! -f $$password_file ) ]]; then
+		printf 'Refusing nonregular Samba password path: %s\n' "$$password_file" >&2
+		exit 1
+	fi
+	if [[ -f $$password_file ]]; then
+		chmod 0600 "$$password_file"
+		chown "$$PI_USER:$$PI_GROUP" "$$password_file"
+	fi
 	if ! pdbedit -L -u "$$PI_USER" >/dev/null 2>&1; then
 		if [[ ! -s $$password_file ]]; then
 			temporary=$$(mktemp "$$PI_HOME/.samba-password.XXXXXX")
