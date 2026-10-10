@@ -28,7 +28,7 @@ STARSHIP_BIN ?= /usr/local/bin/starship
 BOOTSTRAP_BIN ?= /usr/local/sbin/pi-vm-bootstrap
 
 PACKAGES := avahi cloud-utils-growpart curl fastfetch fd-find firewalld fish gcc gcc-c++ git \
-	hyperv-daemons jq make micro nodejs npm openssl podman python3 ripgrep rsync samba \
+	hyperv-daemons jq make micro nodejs npm openssl podman python3 qemu-guest-agent ripgrep rsync samba \
 	samba-client tmux unzip util-linux vim-enhanced wsdd grubby mc awscli2 opentofu ansible
 
 # Bootstrap ordering and package reconciliation
