@@ -41,6 +41,13 @@ EMBED = {
     "config/sshd.conf": (ASSETS / "config/sshd.conf", "0644", "root:root"),
     "config/sudoers": (ASSETS / "config/sudoers", "0440", "root:root"),
     "Makefile": (ASSETS / "Makefile", "0644", "root:root"),
+    "user-context.sh": (ASSETS / "user-context.sh", "0644", "root:root"),
+    "install-user.sh": (ASSETS / "install-user.sh", "0644", "root:root"),
+    "write-user-readme.sh": (ASSETS / "write-user-readme.sh", "0644", "root:root"),
+    "reboot-needed.sh": (ASSETS / "reboot-needed.sh", "0700", "root:root"),
+    "config/readme-wall.sh": (ASSETS / "config/readme-wall.sh", "0644", "root:root"),
+    "config/login.bash": (ASSETS / "config/login.bash", "0644", "root:root"),
+    "config/login.fish": (ASSETS / "config/login.fish", "0644", "root:root"),
     "bootstrap.sh": (ASSETS / "bootstrap.sh", "0700", "root:root"),
 }
 
@@ -74,9 +81,12 @@ def collect_assets() -> list[tuple[str, Path, str, bytes]]:
     return assets
 
 
-def render_seed(instance_id: str, hostname: str, output_dir: Path) -> None:
+def render_seed(instance_id: str, hostname: str, output_dir: Path, username: str = "pi") -> None:
     valid_name(instance_id, r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", "instance id")
     valid_name(hostname, r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?", "hostname")
+    valid_name(username, r"[a-z_][a-z0-9_-]{0,31}", "username")
+    if username == "root":
+        raise ValueError("username must not be root")
     keys = [line for line in (ASSETS / "authorized_keys").read_text(encoding="utf-8-sig").splitlines()
             if line.strip() and not line.lstrip().startswith("#")]
     if not keys:
@@ -94,6 +104,9 @@ def render_seed(instance_id: str, hostname: str, output_dir: Path) -> None:
     user_data = (ASSETS / "cloud-init/user-data.in").read_text(encoding="utf-8-sig")
     user_data = user_data.replace("__HOSTNAME_YAML__", json.dumps(hostname))
     user_data = user_data.replace("__HOSTNAME_SHELL__", hostname)
+    user_data = user_data.replace("__USERNAME_YAML__", json.dumps(username))
+    user_data = user_data.replace("__HOME_YAML__", json.dumps("/home/" + username))
+    user_data = user_data.replace("__USERNAME_SHELL__", username)
     user_data = user_data.replace("__WRITE_FILES__", "\n".join(write_files))
     user_data = user_data.replace("__AUTHORIZED_KEYS__", "\n".join("      - " + json.dumps(key) for key in keys))
     meta_data = (ASSETS / "cloud-init/meta-data.in").read_text(encoding="utf-8-sig")
@@ -148,13 +161,13 @@ def write_istream(stream, output: Path) -> None:
         raise RuntimeError("IMAPI2FS produced an empty ISO")
 
 
-def publish_iso(instance_id: str, hostname: str, output: Path) -> Path:
+def publish_iso(instance_id: str, hostname: str, output: Path, username: str = "pi") -> Path:
     if output.exists() or output.is_symlink():
         raise FileExistsError(f"seed ISO exists; remove it explicitly: {output}")
     output.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     with tempfile.TemporaryDirectory(prefix=f".seed-{instance_id}.", dir=output.parent) as temporary:
         files = Path(temporary) / "files"
-        render_seed(instance_id, hostname, files)
+        render_seed(instance_id, hostname, files, username)
         partial = Path(temporary) / "seed.iso"
         build_iso(files, partial)
         if not partial.is_file() or partial.stat().st_size == 0:
@@ -171,6 +184,7 @@ def publish_iso(instance_id: str, hostname: str, output: Path) -> Path:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("instance_id")
+    parser.add_argument("--username", default=os.environ.get("PI_USER", "pi"))
     parser.add_argument("--hostname", default="pipette")
     parser.add_argument("--output", type=Path, help="ISO destination")
     parser.add_argument("--render-only", type=Path, help="write NoCloud files instead of an ISO")
@@ -181,10 +195,10 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--output and --render-only cannot be combined")
     try:
         if args.render_only:
-            render_seed(args.instance_id, args.hostname, args.render_only)
+            render_seed(args.instance_id, args.hostname, args.render_only, args.username)
             print(args.render_only)
         else:
-            print(publish_iso(args.instance_id, args.hostname, args.output))
+            print(publish_iso(args.instance_id, args.hostname, args.output, args.username))
     except (OSError, ValueError, RuntimeError) as exc:
         parser.error(str(exc))
     return 0

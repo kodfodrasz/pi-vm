@@ -8,6 +8,7 @@ import io
 import json
 from pathlib import Path
 import os
+import pwd
 import subprocess
 import unittest
 from unittest.mock import Mock, patch
@@ -22,7 +23,8 @@ def good():
             'instance_id': 'pipette', 'bootstrap_recovered': False,
             'cloud': {'status': 'done', 'errors': [], 'recoverable_errors': {}},
             'pi': '1.1.0', 'starship': 'starship 1.26.0', 'rootless': True,
-            'selinux': 'Enforcing', 'balloon_driver': True, 'configs': True,
+            'reboot_required': True, 'boot_id': 'new-boot', 'bootstrap_boot_id': 'old-boot',
+            'selinux': 'Disabled', 'balloon_driver': True, 'configs': True,
             'sshd': {'passwordauthentication': 'no', 'kbdinteractiveauthentication': 'no'},
             'root_bytes': 8*1024**3}
 
@@ -30,6 +32,45 @@ def good():
 class ValidatorTests(unittest.TestCase):
     def test_good_metadata(self):
         self.assertEqual(v.check_metadata(good(), 'pipette', 8*1024**3), {})
+
+    def test_latest_semver_core_and_configured_user(self):
+        for version in ("1.1.0", "11.2.3", "2.0.0-rc.1", "2.3.4+build.5"):
+            data = good()
+            data.update(pi=version, user="developer")
+            with self.subTest(version=version):
+                self.assertEqual(v.check_metadata(data, 'pipette', 8*1024**3,
+                                                  username="developer"), {})
+        for version in ("", "latest", "1.2", "v1.2.3", "1.2.3\nnoise", "01.2.3"):
+            data = good()
+            data['pi'] = version
+            with self.subTest(version=version), self.assertRaises(v.Failure):
+                v.check_metadata(data, 'pipette', 8*1024**3)
+
+    def test_required_reboot_cannot_false_pass_on_initial_boot(self):
+        data = good()
+        data['boot_id'] = data['bootstrap_boot_id']
+        with self.assertRaisesRegex(v.Failure, 'reboot has not completed'):
+            v.check_metadata(data, 'pipette', 8*1024**3)
+        data['reboot_required'] = False
+        self.assertEqual(v.check_metadata(data, 'pipette', 8*1024**3), {})
+        data['selinux'] = 'Enforcing'
+        with self.assertRaisesRegex(v.Failure, 'SELinux is not disabled'):
+            v.check_metadata(data, 'pipette', 8*1024**3)
+
+    def test_remote_waits_for_required_reboot_before_config_probes(self):
+        marker = 'recovered_from_failure=false\nreboot_required=true\nboot_id=boot-one'
+        def read_text(path, *args, **kwargs):
+            return 'boot-one' if str(path) == '/proc/sys/kernel/random/boot_id' else marker
+        replies = [subprocess.CompletedProcess([], 0, 'pipette', ''),
+                   subprocess.CompletedProcess([], 0, json.dumps(good()['cloud']), '')]
+        output = io.StringIO()
+        with patch.object(v.subprocess, 'run', side_effect=replies) as run, \
+             patch.object(Path, 'is_file', return_value=True), \
+             patch.object(Path, 'read_text', read_text), contextlib.redirect_stdout(output):
+            with self.assertRaises(SystemExit):
+                exec(v.REMOTE, {'EXPECTED_INSTANCE': 'pipette'})
+        self.assertEqual(json.loads(output.getvalue()), {'ready': False})
+        self.assertEqual(run.call_count, 2)
 
     def test_missing_fields_fail_closed(self):
         for key in good():
@@ -40,7 +81,7 @@ class ValidatorTests(unittest.TestCase):
 
     def test_bad_metadata(self):
         for key, value in [('ready', False), ('user', 'root'), ('shell', None),
-                           ('hostname', 'other'), ('instance_id', 'other'), ('pi', '11.1.0'),
+                           ('hostname', 'other'), ('instance_id', 'other'), ('pi', ''),
                            ('starship', 'starship 1.26.01'), ('rootless', False),
                            ('rootless', 'true'), ('configs', False),
                            ('selinux', 'Permissive'), ('balloon_driver', False),
@@ -163,7 +204,7 @@ class ValidatorTests(unittest.TestCase):
         output = io.StringIO()
         with patch.object(v.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, 'other-vm', '')) as run, \
              patch.object(Path, 'is_file', return_value=True), \
-             patch.object(Path, 'read_text', return_value='recovered_from_failure=false'), \
+             patch.object(Path, 'read_text', return_value='recovered_from_failure=false\nreboot_required=false\nboot_id=old-boot'), \
              contextlib.redirect_stdout(output):
             with self.assertRaises(SystemExit):
                 exec(v.REMOTE, {'EXPECTED_INSTANCE': 'pipette'})
@@ -176,7 +217,7 @@ class ValidatorTests(unittest.TestCase):
         output = io.StringIO()
         with patch.object(v.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, json.dumps(status), '')), \
              patch.object(Path, 'is_file', return_value=True), \
-             patch.object(Path, 'read_text', return_value='recovered_from_failure=false'), \
+             patch.object(Path, 'read_text', return_value='recovered_from_failure=false\nreboot_required=false\nboot_id=old-boot'), \
              contextlib.redirect_stdout(output):
             with self.assertRaises(SystemExit) as result:
                 exec(v.REMOTE, {})
@@ -192,7 +233,7 @@ class ValidatorTests(unittest.TestCase):
         output = io.StringIO()
         with patch.object(v.subprocess, 'run', side_effect=replies), \
              patch.object(Path, 'is_file', return_value=True), \
-             patch.object(Path, 'read_text', return_value='recovered_from_failure=true'), \
+             patch.object(Path, 'read_text', return_value='recovered_from_failure=true\nreboot_required=false\nboot_id=old-boot'), \
              contextlib.redirect_stdout(output):
             with self.assertRaises(SystemExit) as result:
                 exec(v.REMOTE, {})
@@ -209,7 +250,7 @@ class ValidatorTests(unittest.TestCase):
             return subprocess.CompletedProcess(argv, 0, output, '')
         with patch.object(v.subprocess, 'run', side_effect=remote_command) as run, \
              patch.object(Path, 'is_file', return_value=True), \
-             patch.object(Path, 'read_text', return_value='recovered_from_failure=false'):
+             patch.object(Path, 'read_text', return_value='recovered_from_failure=false\nreboot_required=false\nboot_id=old-boot'):
             with self.assertRaisesRegex(RuntimeError, 'unknown command'):
                 exec(v.REMOTE, {})
         self.assertTrue(any('kill-server' in call.args[0] for call in run.call_args_list))
@@ -223,7 +264,7 @@ class ValidatorTests(unittest.TestCase):
                 return subprocess.CompletedProcess(argv, 0, output, '')
             with patch.object(v.subprocess, 'run', side_effect=remote_command), \
                  patch.object(Path, 'is_file', return_value=True), \
-                 patch.object(Path, 'read_text', return_value='recovered_from_failure=false'):
+                 patch.object(Path, 'read_text', return_value='recovered_from_failure=false\nreboot_required=false\nboot_id=old-boot'):
                 with self.subTest(code=code), self.assertRaisesRegex(RuntimeError, 'temporary tmux'):
                     exec(v.REMOTE, {})
 
@@ -246,18 +287,18 @@ class ValidatorTests(unittest.TestCase):
             elif argv[0] == 'podman':
                 output = 'true'
             elif argv[0] == 'getenforce':
-                output = 'Enforcing'
+                output = 'Disabled'
             return subprocess.CompletedProcess(argv, 0, output, '')
         output = io.StringIO()
         with patch.object(v.subprocess, 'run', side_effect=remote_command) as run, \
              patch.object(Path, 'is_file', return_value=True), patch.object(Path, 'is_dir', return_value=True), \
-             patch.object(Path, 'read_text', return_value='recovered_from_failure=false'), \
+             patch.object(Path, 'read_text', return_value='recovered_from_failure=false\nreboot_required=false\nboot_id=old-boot'), \
              patch.dict(os.environ, {'SSH_CONNECTION': '10.0.2.2 49152 10.0.2.15 22'}), \
              contextlib.redirect_stdout(output):
             exec(v.REMOTE, {})
         data = json.loads(output.getvalue())
         data.update(user='pi', shell='/bin/fish')
-        self.assertTrue(any('-C' in call.args[0] and 'user=pi,addr=10.0.2.2,host=10.0.2.2,laddr=10.0.2.15,lport=22' in call.args[0]
+        self.assertTrue(any('-C' in call.args[0] and f'user={pwd.getpwuid(os.getuid()).pw_name},addr=10.0.2.2,host=10.0.2.2,laddr=10.0.2.15,lport=22' in call.args[0]
                             for call in run.call_args_list))
         with self.assertRaisesRegex(v.Failure, 'password authentication'):
             v.check_metadata(data, 'pipette', 8*1024**3)

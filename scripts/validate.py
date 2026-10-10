@@ -50,6 +50,15 @@ status = json.loads(cloud.stdout)
 if status.get('status') == 'running' and status.get('errors') == []:
     print(json.dumps({'ready': False}))
     raise SystemExit(0)
+completion = dict(line.split('=', 1) for line in success_marker.read_text().splitlines())
+reboot_required = completion.get('reboot_required')
+bootstrap_boot_id = completion.get('boot_id')
+boot_id = pathlib.Path('/proc/sys/kernel/random/boot_id').read_text().strip()
+if reboot_required not in ('true', 'false') or not bootstrap_boot_id or not boot_id:
+    raise RuntimeError('bootstrap reboot metadata missing')
+if reboot_required == 'true' and bootstrap_boot_id == boot_id:
+    print(json.dumps({'ready': False}))
+    raise SystemExit(0)
 home = pathlib.Path.home()
 run(['fish', '-n', str(home/'.config/fish/config.fish'),
      str(home/'.config/fish/completions/pi.fish')])
@@ -80,7 +89,7 @@ connection = os.environ.get('SSH_CONNECTION', '').split()
 if len(connection) != 4:
     raise RuntimeError('SSH connection metadata missing')
 peer, _, local, port = connection
-criteria = f'user=pi,addr={peer},host={peer},laddr={local},lport={port}'
+criteria = f'user={pwd.getpwuid(os.getuid()).pw_name},addr={peer},host={peer},laddr={local},lport={port}'
 sshd = dict(line.split(None, 1) for line in run(['sudo', '-n', 'sshd', '-T', '-C', criteria]).splitlines())
 print(json.dumps({
     'ready': True, 'user': pwd.getpwuid(os.getuid()).pw_name,
@@ -88,6 +97,8 @@ print(json.dumps({
     'hostname': run(['hostname']), 'cloud': status,
     'instance_id': instance_id,
     'bootstrap_recovered': bootstrap_recovered,
+    'reboot_required': reboot_required == 'true',
+    'bootstrap_boot_id': bootstrap_boot_id, 'boot_id': boot_id,
     'root_bytes': fs.f_blocks * fs.f_frsize,
     'pi': run([str(home/'.local/bin/pi'), '--version']),
     'starship': run(['starship', '--version']).splitlines()[0],
@@ -103,10 +114,10 @@ class Failure(Exception):
     pass
 
 
-def ssh(port, hosts, code, command='python3 -', timeout=45):
+def ssh(port, hosts, code, command='python3 -', timeout=45, username='pi'):
     argv = ['ssh', '-p', str(port), '-o', 'BatchMode=yes',
             '-o', 'StrictHostKeyChecking=accept-new', '-o', 'ConnectTimeout=5',
-            '-o', 'UserKnownHostsFile=' + str(hosts), 'pi@127.0.0.1', command]
+            '-o', 'UserKnownHostsFile=' + str(hosts), username + '@127.0.0.1', command]
     try:
         result = subprocess.run(argv, input=code, text=True, capture_output=True,
                                 timeout=timeout)
@@ -120,13 +131,13 @@ def ssh(port, hosts, code, command='python3 -', timeout=45):
     return result
 
 
-def collect(port, hosts, wait_seconds, instance_id=None):
+def collect(port, hosts, wait_seconds, instance_id=None, username='pi'):
     deadline = time.monotonic() + wait_seconds
     while time.monotonic() < deadline:
         remaining = max(.1, deadline - time.monotonic())
         try:
             code = 'EXPECTED_INSTANCE = ' + json.dumps(instance_id) + '\n' + REMOTE
-            result = ssh(port, hosts, code, timeout=min(45, remaining))
+            result = ssh(port, hosts, code, timeout=min(45, remaining), username=username)
         except Failure as exc:
             if str(exc) != 'SSH timed out':
                 raise
@@ -148,13 +159,13 @@ def collect(port, hosts, wait_seconds, instance_id=None):
     raise Failure('bootstrap marker not ready before timeout')
 
 
-def check_metadata(data, hostname, disk_bytes, instance_id='pipette'):
+def check_metadata(data, hostname, disk_bytes, instance_id='pipette', username='pi'):
     def require(condition, message):
         if not condition:
             raise Failure(message)
 
     require(data.get('ready') is True, 'bootstrap marker missing')
-    require(data.get('user') == 'pi', 'unexpected guest user')
+    require(data.get('user') == username, 'unexpected guest user')
     require(
         isinstance(data.get('shell'), str) and Path(data['shell']).name == 'fish',
         'pi login shell is not fish'
@@ -208,10 +219,17 @@ def check_metadata(data, hostname, disk_bytes, instance_id='pipette'):
                 'unexpected cloud-init warning'
             )
 
-    require(data.get('pi') == '1.1.0', 'Pi version is not 1.1.0')
+    require(isinstance(data.get('pi'), str) and re.fullmatch(
+        r'(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?',
+        data['pi']) is not None, 'Pi version is not a nonempty semantic version')
+    require(type(data.get('reboot_required')) is bool, 'bootstrap reboot metadata missing')
+    require(all(isinstance(data.get(key), str) and data[key]
+                for key in ('boot_id', 'bootstrap_boot_id')), 'bootstrap boot IDs missing')
+    require(not data['reboot_required'] or data['boot_id'] != data['bootstrap_boot_id'],
+            'SELinux reboot has not completed')
     require(data.get('starship') == 'starship 1.26.0', 'Starship version is not 1.26.0')
     require(data.get('rootless') is True, 'Podman is not rootless')
-    require(data.get('selinux') == 'Enforcing', 'SELinux is not enforcing')
+    require(data.get('selinux') == 'Disabled', 'SELinux is not disabled')
     require(data.get('balloon_driver') is True, 'virtio balloon driver missing')
     require(data.get('configs') is True, 'editor or shell config check missing')
 
@@ -315,7 +333,7 @@ def validate(args):
         raise Failure('instance is not running: ' + state.stdout.strip())
     hosts = args.known_hosts or instance / 'known_hosts'
     hosts.parent.mkdir(parents=True, exist_ok=True)
-    data = collect(args.ssh_port, hosts, args.wait_seconds, args.instance)
+    data = collect(args.ssh_port, hosts, args.wait_seconds, args.instance, args.username)
     if data.get('instance_id') != args.instance:
         raise Failure('guest instance ID mismatch (check SSH port)')
     image = subprocess.run(['qemu-img', 'info', '-U', '--output=json', str(instance/'disk.qcow2')],
@@ -326,7 +344,7 @@ def validate(args):
         disk = json.loads(image.stdout)['virtual-size']
     except (ValueError, KeyError) as exc:
         raise Failure('cannot read virtual disk size') from exc
-    warnings = check_metadata(data, args.hostname, disk, args.instance)
+    warnings = check_metadata(data, args.hostname, disk, args.instance, args.username)
     report = {
         'instance': args.instance,
         'status': 'PASS',
@@ -347,7 +365,7 @@ module = 'kvm_amd' if 'svm' in cpu_info else 'kvm_intel'
 subprocess.run(['modprobe', module], check=True)
 """
         code += (ROOT/'tests/nested-kvm.py').read_text()
-        result = ssh(args.ssh_port, hosts, code, command='sudo -n python3 -', timeout=30)
+        result = ssh(args.ssh_port, hosts, code, command='sudo -n python3 -', timeout=30, username=args.username)
         if result.returncode or 'PASS: nested KVM executed an L2 halt instruction' not in result.stdout:
             raise Failure('nested KVM execution failed: ' + result.stderr.strip())
         report['nested_kvm'] = True
@@ -376,6 +394,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--instance', required=True)
     parser.add_argument('--ssh-port', type=int, default=2222)
+    parser.add_argument('--username', default=os.environ.get('PI_USER', 'pi'))
     parser.add_argument('--hostname', default='pipette')
     parser.add_argument('--known-hosts', type=Path)
     parser.add_argument('--wait-seconds', type=int, default=300)
@@ -384,6 +403,8 @@ def main():
     parser.add_argument('--nested', action='store_true')
     parser.add_argument('--balloon', action='store_true')
     args = parser.parse_args()
+    if not re.fullmatch(r'[a-z_][a-z0-9_-]{0,31}', args.username) or args.username == 'root':
+        parser.error('invalid username')
     if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,100}', args.instance):
         parser.error('invalid instance ID')
     if not 1024 <= args.ssh_port <= 65535 or not 1 <= args.wait_seconds <= 3600:

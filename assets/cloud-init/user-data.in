@@ -9,7 +9,8 @@ growpart:
   ignore_growroot_disabled: false
 resize_rootfs: true
 users:
-  - name: pi
+  - name: __USERNAME_YAML__
+    homedir: __HOME_YAML__
     gecos: Pi VM user
     groups: [wheel]
     shell: /bin/bash
@@ -20,6 +21,7 @@ __AUTHORIZED_KEYS__
 ssh_pwauth: false
 disable_root: true
 package_update: true
+package_upgrade: true
 packages:
   - cloud-utils-growpart
   - hyperv-daemons
@@ -28,4 +30,10 @@ packages:
 write_files:
 __WRITE_FILES__
 runcmd:
-  - [env, "VM_HOSTNAME=__HOSTNAME_SHELL__", /opt/pi-vm/bootstrap.sh]
+  - [env, "VM_HOSTNAME=__HOSTNAME_SHELL__", "PI_USER=__USERNAME_SHELL__", "PI_VM_CLOUD_INIT=1", /opt/pi-vm/bootstrap.sh]
+# Only a completed bootstrap from this boot may request the SELinux reboot.
+power_state:
+  mode: reboot
+  delay: now
+  timeout: 30
+  condition: [/opt/pi-vm/reboot-needed.sh]

@@ -1,4 +1,4 @@
-# Pi 1.1.0 completions, checked against the pinned package's `pi --help`.
+# Common Pi completions; use pi --help for the current managed release.
 # This small set does not depend on a global npm path or provider credentials.
 complete -c pi -n '__fish_use_subcommand' -a 'install remove uninstall update list config auth mcp' -f
 complete -c pi -s h -l help -d 'Show help'

@@ -4,10 +4,11 @@ SHELL := /usr/bin/bash
 .SILENT:
 
 STAGE ?= /opt/pi-vm
-CONFIG ?= /etc/pi-vm
+SELINUX_CONFIG ?= /etc/selinux/config
 STATE ?= /var/lib/pi-vm
 CACHE ?= /var/cache/pi-vm
-PI_HOME ?= /home/pi
+PI_USER ?= pi
+export PI_USER
 SKEL ?= /etc/skel
 SSH_CONFIG ?= /etc/ssh/sshd_config.d
 SUDOERS ?= /etc/sudoers.d
@@ -17,7 +18,8 @@ SHELLS_FILE ?= /etc/shells
 SUBUID_FILE ?= /etc/subuid
 SUBGID_FILE ?= /etc/subgid
 AZURE_CONFIG ?= /etc/waagent.conf
-AZURE_STATE ?= /var/lib/waagent
+AZURE_SELINUX_CONFIG ?= /etc/selinux/config
+STATE ?= /var/lib/waagent
 AZURE_LOG ?= /var/log/waagent.log
 
 STARSHIP_URL ?= https://github.com/starship/starship/releases/download/v1.26.0/starship-x86_64-unknown-linux-musl.tar.gz
@@ -28,42 +30,45 @@ BOOTSTRAP_BIN ?= /usr/local/sbin/pi-vm-bootstrap
 
 PACKAGES := avahi cloud-utils-growpart curl fastfetch fd-find firewalld fish gcc gcc-c++ git \
 	hyperv-daemons jq make micro nodejs npm openssl podman python3 ripgrep rsync samba \
-	samba-client tmux unzip vim-enhanced wsdd
-CONFIG_FILES := $(CONFIG)/authorized_keys $(CONFIG)/public-key-identities.txt \
-	$(CONFIG)/vimrc $(CONFIG)/tmux.conf $(CONFIG)/starship.toml \
-	$(CONFIG)/config.fish $(CONFIG)/pi.fish $(CONFIG)/smb.conf \
-	$(CONFIG)/firewall-sources.conf $(CONFIG)/avahi-samba.service \
-	$(CONFIG)/pi-settings.json $(CONFIG)/AGENTS.md $(CONFIG)/kodfodrasz/SKILL.md
+	samba-client tmux unzip util-linux vim-enhanced wsdd grubby
+
+# Bootstrap ordering and package reconciliation
 
 .PHONY: bootstrap validate-input set-hostname install-packages remove-azure \
-	install-starship configure-ssh stage-configs install-default-configs \
-	configure-pi-user configure-file-sharing print-deploy-key run-local-payload
+	install-starship configure-system configure-user configure-file-sharing run-local-payload
 
-# Every state-changing step names its predecessor. This keeps the graph safe
-# under -j instead of relying on sibling prerequisite ordering.
 bootstrap: run-local-payload
-run-local-payload: print-deploy-key
-print-deploy-key: configure-file-sharing
-configure-file-sharing: configure-pi-user
-configure-pi-user: install-default-configs
-install-default-configs: configure-ssh
-configure-ssh: install-starship
+run-local-payload: configure-file-sharing
+configure-file-sharing: configure-user
+configure-user: configure-system
+configure-system: install-starship
 install-starship: remove-azure
-remove-azure: stage-configs
-stage-configs: install-packages
-install-packages: set-hostname
-install-packages: | $(BOOTSTRAP_BIN)
+remove-azure: install-packages
+install-packages: set-hostname | $(BOOTSTRAP_BIN)
 set-hostname: validate-input
 
 validate-input:
 	[[ $${VM_HOSTNAME:-} =~ ^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?$$ ]]
+	[[ $$PI_USER =~ ^[a-z_][a-z0-9_-]{0,31}$$ && $$PI_USER != root ]]
 	[[ -d $(STAGE) ]]
+	if [[ -d $(STAGE)/local ]]; then
+		find -P "$(STAGE)/local" -exec chown -h root:root {} +
+		find -P "$(STAGE)/local" -type d -exec chmod 0700 {} +
+		find -P "$(STAGE)/local" -type f ! -name bootstrap.sh -exec chmod 0600 {} +
+		if [[ -f $(STAGE)/local/bootstrap.sh ]]; then chmod 0700 "$(STAGE)/local/bootstrap.sh"; fi
+	fi
+	source "$(STAGE)/user-context.sh"
 
 set-hostname:
 	hostnamectl set-hostname "$${VM_HOSTNAME}"
 
 install-packages:
 	dnf -y install $(PACKAGES)
+
+$(BOOTSTRAP_BIN): $(STAGE)/bootstrap.sh | validate-input
+	install -D -m 0755 -o root -g root "$<" "$@"
+
+# Pinned Starship download; real file targets retain cache on retries
 
 remove-azure:
 	installed=()
@@ -106,157 +111,115 @@ $(STARSHIP_BIN): $(STARSHIP_ARCHIVE) | install-packages
 
 install-starship: $(STARSHIP_BIN)
 
-# These are real installed files, not success stamps. install also repairs
-# modes and ownership when a source file changes.
-$(CONFIG):
-	install -d -m 0755 "$@"
-$(STATE):
-	install -d -m 0755 "$@"
-$(CONFIG)/kodfodrasz:
-	install -d -m 0755 "$@"
 
-$(CONFIG)/authorized_keys: $(STAGE)/authorized_keys | $(CONFIG)
-	install -m 0600 -o root -g root "$<" "$@"
-$(CONFIG)/public-key-identities.txt: $(STAGE)/public-key-identities.txt | $(CONFIG)
-	install -m 0644 -o root -g root "$<" "$@"
-$(CONFIG)/vimrc: $(STAGE)/config/vimrc | $(CONFIG)
-	install -m 0644 -o root -g root "$<" "$@"
-$(CONFIG)/tmux.conf: $(STAGE)/config/tmux.conf | $(CONFIG)
-	install -m 0644 -o root -g root "$<" "$@"
-$(CONFIG)/starship.toml: $(STAGE)/config/starship.toml | $(CONFIG)
-	install -m 0644 -o root -g root "$<" "$@"
-$(CONFIG)/config.fish: $(STAGE)/config/config.fish | $(CONFIG)
-	install -m 0644 -o root -g root "$<" "$@"
-$(CONFIG)/pi.fish: $(STAGE)/config/pi.fish | $(CONFIG)
-	install -m 0644 -o root -g root "$<" "$@"
-$(CONFIG)/smb.conf: $(STAGE)/config/smb.conf | $(CONFIG)
-	install -m 0644 -o root -g root "$<" "$@"
-$(CONFIG)/firewall-sources.conf: $(STAGE)/config/firewall-sources.conf | $(CONFIG)
-	install -m 0644 -o root -g root "$<" "$@"
-$(CONFIG)/avahi-samba.service: $(STAGE)/config/avahi-samba.service | $(CONFIG)
-	install -m 0644 -o root -g root "$<" "$@"
-$(CONFIG)/pi-settings.json: $(STAGE)/pi/settings.json | $(CONFIG)
-	install -m 0600 -o root -g root "$<" "$@"
-$(CONFIG)/AGENTS.md: $(STAGE)/pi/AGENTS.md | $(CONFIG)
-	install -m 0644 -o root -g root "$<" "$@"
-$(CONFIG)/kodfodrasz/SKILL.md: $(STAGE)/skills/kodfodrasz/SKILL.md | $(CONFIG)/kodfodrasz
-	install -m 0644 -o root -g root "$<" "$@"
+# System destinations are installed directly from the staged seed
 
-# Configuration files wait for validation and package availability, but keep
-# their normal timestamp behavior so retries do not rebuild them blindly.
-$(CONFIG_FILES): | install-packages
+$(SSH_CONFIG)/10-pi-vm.conf: $(STAGE)/config/sshd.conf | install-packages
+	install -D -m 0644 -o root -g root "$<" "$@"
 
-$(BOOTSTRAP_BIN): $(STAGE)/bootstrap.sh | validate-input
-	install -D -m 0755 -o root -g root "$<" "$@"
+$(SAMBA_CONFIG): $(STAGE)/config/smb.conf | install-packages
+	install -D -m 0644 -o root -g root "$<" "$@"
 
-stage-configs: $(CONFIG_FILES) $(BOOTSTRAP_BIN)
-	if [[ -d $(STAGE)/local ]]; then
-		if [[ -L $(CONFIG)/local ]]; then rm -f -- $(CONFIG)/local; fi
-		rm -rf -- $(CONFIG)/local
-		install -d -m 0700 -o root -g root $(CONFIG)/local
-		cp -a --no-preserve=ownership $(STAGE)/local/. $(CONFIG)/local/
-		find -P $(CONFIG)/local -exec chown -h root:root {} +
-		find -P $(CONFIG)/local -type d -exec chmod 0700 {} +
-		find -P $(CONFIG)/local -type f ! -name bootstrap.sh -exec chmod 0600 {} +
-		if [[ -f $(CONFIG)/local/bootstrap.sh ]]; then chmod 0700 $(CONFIG)/local/bootstrap.sh; fi
-	fi
+$(AVAHI_SERVICES)/samba.service: $(STAGE)/config/avahi-samba.service | install-packages
+	install -D -m 0644 -o root -g root "$<" "$@"
 
-configure-ssh:
-	install -d -m 0755 "$(SSH_CONFIG)"
-	install -m 0644 -o root -g root "$(STAGE)/config/sshd.conf" "$(SSH_CONFIG)/10-pi-vm.conf"
+configure-system: $(SSH_CONFIG)/10-pi-vm.conf $(SAMBA_CONFIG) $(AVAHI_SERVICES)/samba.service
 	systemctl enable --now sshd
-
-install-default-configs:
-	install -D -m 0644 "$(CONFIG)/vimrc" "$(SKEL)/.vimrc"
-	install -D -m 0644 "$(CONFIG)/tmux.conf" "$(SKEL)/.config/tmux/tmux.conf"
-	install -D -m 0644 "$(CONFIG)/starship.toml" "$(SKEL)/.config/starship.toml"
-	install -D -m 0644 "$(CONFIG)/config.fish" "$(SKEL)/.config/fish/config.fish"
-	install -D -m 0644 "$(CONFIG)/pi.fish" "$(SKEL)/.config/fish/completions/pi.fish"
-
-configure-pi-user:
-	if ! id pi >/dev/null 2>&1; then
-		useradd --create-home --shell /bin/bash --groups wheel pi
-	fi
-	usermod --lock pi
-	install -d -m 0700 -o pi -g pi "$(PI_HOME)/.ssh"
-	install -m 0600 -o pi -g pi "$(CONFIG)/authorized_keys" "$(PI_HOME)/.ssh/authorized_keys"
-	if [[ ! -e $(PI_HOME)/.ssh/pi-vm-deploy ]]; then
-		runuser -u pi -- ssh-keygen -q -t ed25519 -N '' -C "pi-vm-deploy@$${VM_HOSTNAME}" -f "$(PI_HOME)/.ssh/pi-vm-deploy"
-	fi
 	install -D -m 0440 -o root -g root "$(STAGE)/config/sudoers" "$(SUDOERS)/90-pi-vm"
 	visudo -cf "$(SUDOERS)/90-pi-vm"
-	install -D -m 0644 -o pi -g pi "$(CONFIG)/vimrc" "$(PI_HOME)/.vimrc"
-	install -D -m 0644 -o pi -g pi "$(CONFIG)/tmux.conf" "$(PI_HOME)/.config/tmux/tmux.conf"
-	install -D -m 0644 -o pi -g pi "$(CONFIG)/starship.toml" "$(PI_HOME)/.config/starship.toml"
-	install -D -m 0644 -o pi -g pi "$(CONFIG)/config.fish" "$(PI_HOME)/.config/fish/config.fish"
-	install -D -m 0644 -o pi -g pi "$(CONFIG)/pi.fish" "$(PI_HOME)/.config/fish/completions/pi.fish"
-	install -D -m 0600 -o pi -g pi "$(CONFIG)/pi-settings.json" "$(PI_HOME)/.pi/agent/settings.json"
-	install -D -m 0644 -o pi -g pi "$(CONFIG)/AGENTS.md" "$(PI_HOME)/.pi/agent/AGENTS.md"
-	install -D -m 0644 -o pi -g pi "$(CONFIG)/kodfodrasz/SKILL.md" "$(PI_HOME)/.pi/agent/skills/kodfodrasz/SKILL.md"
-	install -d -m 0755 -o pi -g pi "$(PI_HOME)/.local/share/pi-npm" "$(PI_HOME)/.local/bin"
-	# Repair every existing tree before any command runs as pi. -P and -h
-	# make symlink ownership changes without dereferencing their targets.
-	find -P "$(PI_HOME)/.config" "$(PI_HOME)/.pi" "$(PI_HOME)/.local" -exec chown -h pi:pi {} +
-	runuser -u pi -- env HOME="$(PI_HOME)" npm install --global --prefix "$(PI_HOME)/.local/share/pi-npm" @earendil-works/pi-coding-agent@1.1.0
-	ln -sfn "$(PI_HOME)/.local/share/pi-npm/bin/pi" "$(PI_HOME)/.local/bin/pi"
-	chown -h pi:pi "$(PI_HOME)/.local/bin/pi"
-	runuser -u pi -- env HOME="$(PI_HOME)" "$(PI_HOME)/.local/bin/pi" install npm:pi-web-access@0.37.0
-	runuser -u pi -- env HOME="$(PI_HOME)" "$(PI_HOME)/.local/bin/pi" install npm:pi-subagents@0.76.1
-	runuser -u pi -- env HOME="$(PI_HOME)" "$(PI_HOME)/.local/bin/pi" install npm:pi-reset-usage-limit@0.1.1
-	runuser -u pi -- env HOME="$(PI_HOME)" "$(PI_HOME)/.local/bin/pi" install npm:@wayner6/pi-usage@0.3.0
-	runuser -u pi -- env HOME="$(PI_HOME)" "$(PI_HOME)/.local/bin/pi" install npm:pi-keep-going@1.1.0
-	find -P "$(PI_HOME)/.config" "$(PI_HOME)/.pi" "$(PI_HOME)/.local" -exec chown -h pi:pi {} +
-	grep -q '^pi:' "$(SUBUID_FILE)" || usermod --add-subuids 100000-165535 pi
-	grep -q '^pi:' "$(SUBGID_FILE)" || usermod --add-subgids 100000-165535 pi
-	loginctl enable-linger pi
+	# Fedora requires selinux=0 on the kernel command line to fully disable it.
+	grubby --update-kernel=ALL --args=selinux=0
+	sed -i 's/^SELINUX=.*/SELINUX=disabled/' "$(SELINUX_CONFIG)"
+	grep -qx 'SELINUX=disabled' "$(SELINUX_CONFIG)"
+	install -D -m 0644 "$(STAGE)/config/vimrc" "$(SKEL)/.vimrc"
+	install -D -m 0644 "$(STAGE)/config/tmux.conf" "$(SKEL)/.config/tmux/tmux.conf"
+	install -D -m 0644 "$(STAGE)/config/starship.toml" "$(SKEL)/.config/starship.toml"
+	install -D -m 0644 "$(STAGE)/config/config.fish" "$(SKEL)/.config/fish/config.fish"
+	install -D -m 0644 "$(STAGE)/config/pi.fish" "$(SKEL)/.config/fish/completions/pi.fish"
+
+# Cloud-init owns the account; use its home and primary group
+
+configure-user:
+	source "$(STAGE)/user-context.sh"
+	usermod --lock --append --groups wheel "$$PI_USER"
+	install -d -m 0700 -o "$$PI_USER" -g "$$PI_GROUP" "$$PI_HOME/.ssh"
+	install -m 0600 -o "$$PI_USER" -g "$$PI_GROUP" "$(STAGE)/authorized_keys" "$$PI_HOME/.ssh/authorized_keys"
+	for mapping in 'vimrc:.vimrc' 'tmux.conf:.config/tmux/tmux.conf' 'starship.toml:.config/starship.toml' 'config.fish:.config/fish/config.fish' 'pi.fish:.config/fish/completions/pi.fish'; do
+		source_file=$${mapping%%:*}; destination=$$PI_HOME/$${mapping#*:}
+		if [[ ! -e $$destination ]]; then
+			install -D -m 0644 -o "$$PI_USER" -g "$$PI_GROUP" "$(STAGE)/config/$$source_file" "$$destination"
+		fi
+	done
+	install -D -m 0600 -o "$$PI_USER" -g "$$PI_GROUP" "$(STAGE)/pi/settings.json" "$$PI_HOME/.pi/agent/settings.json"
+	install -D -m 0644 -o "$$PI_USER" -g "$$PI_GROUP" "$(STAGE)/pi/AGENTS.md" "$$PI_HOME/.pi/agent/AGENTS.md"
+	install -D -m 0644 -o "$$PI_USER" -g "$$PI_GROUP" "$(STAGE)/skills/kodfodrasz/SKILL.md" "$$PI_HOME/.pi/agent/skills/kodfodrasz/SKILL.md"
+	install -D -m 0755 -o "$$PI_USER" -g "$$PI_GROUP" "$(STAGE)/config/readme-wall.sh" "$$PI_HOME/.local/bin/pi-vm-readme"
+	install -D -m 0644 -o "$$PI_USER" -g "$$PI_GROUP" "$(STAGE)/config/login.fish" "$$PI_HOME/.config/fish/conf.d/pi-vm-login.fish"
+	install -D -m 0644 -o "$$PI_USER" -g "$$PI_GROUP" "$(STAGE)/config/login.bash" "$$PI_HOME/.config/pi-vm/login.bash"
+	profile_line='if [ -n "$${BASH_VERSION:-}" ]; then . "$$HOME/.config/pi-vm/login.bash"; fi'
+	# Bash reads the first of these existing profiles on login.
+	profile=$$PI_HOME/.bash_profile
+	if [[ ! -e $$profile ]]; then
+		if [[ -e $$PI_HOME/.bash_login ]]; then profile=$$PI_HOME/.bash_login
+		elif [[ -e $$PI_HOME/.profile ]]; then profile=$$PI_HOME/.profile
+		fi
+	fi
+	touch "$$profile"
+	grep -Fxq "$$profile_line" "$$profile" || printf '\n%s\n' "$$profile_line" >> "$$profile"
+	chown "$$PI_USER:$$PI_GROUP" "$$profile"
+	find -P "$$PI_HOME/.config" "$$PI_HOME/.pi" "$$PI_HOME/.local" -exec chown -h "$$PI_USER:$$PI_GROUP" {} +
+	as_user sh "$(STAGE)/install-user.sh"
+	bash "$(STAGE)/write-user-readme.sh"
+	grep -q "^$$PI_USER:" "$(SUBUID_FILE)" || usermod --add-subuids 100000-165535 "$$PI_USER"
+	grep -q "^$$PI_USER:" "$(SUBGID_FILE)" || usermod --add-subgids 100000-165535 "$$PI_USER"
+	loginctl enable-linger "$$PI_USER"
 	fish_shell=$$(grep -E '/fish$$' "$(SHELLS_FILE)" | head -1 || true)
 	[[ -n $$fish_shell ]]
-	chsh -s "$$fish_shell" pi
+	chsh -s "$$fish_shell" "$$PI_USER"
+	echo 'Private-repository deploy public key:'
+	cat "$$PI_HOME/.ssh/pi-vm-deploy.pub"
+	echo "Authorize this key, then see ~/README.md for the clone command."
 
-configure-file-sharing: $(STATE)
-	install -D -m 0644 -o root -g root "$(CONFIG)/smb.conf" "$(SAMBA_CONFIG)"
-	install -D -m 0644 -o root -g root "$(CONFIG)/avahi-samba.service" "$(AVAHI_SERVICES)/samba.service"
+# Named trusted sets preserve additional entries added by the owner
+
+configure-file-sharing:
+	source "$(STAGE)/user-context.sh"
 	testparm -s >/dev/null
-	setsebool -P samba_enable_home_dirs on
-	# This is a sourced, root-owned configuration file, not user input.
-	source "$(CONFIG)/firewall-sources.conf"
+	source "$(STAGE)/config/firewall-sources.conf"
 	systemctl enable --now firewalld
 	firewall-cmd --set-default-zone=public
-	firewall-cmd --permanent --zone=public --add-service=ssh
-	firewall-cmd --permanent --zone=public --add-service=mdns
-	firewall-cmd --permanent --zone=public --add-service=wsdd
-	firewall-cmd --permanent --zone=public --add-service=wsdd-http
-	firewall-cmd --permanent --zone=trusted --add-source="$$HOME_LAN_CIDR"
-	firewall-cmd --permanent --zone=trusted --add-source="$$VPN_CIDR"
+	for service in ssh mdns wsdd wsdd-http; do
+		firewall-cmd --permanent --zone=public --add-service="$$service"
+	done
+	for definition in "home_lan:$$HOME_LAN_CIDR" "vpn:$$VPN_CIDR"; do
+		name=$${definition%%:*}; cidr=$${definition#*:}
+		if ! firewall-cmd --permanent --get-ipsets | tr ' ' '\n' | grep -Fxq "$$name"; then
+			firewall-cmd --permanent --new-ipset="$$name" --type=hash:net
+		fi
+		firewall-cmd --permanent --ipset="$$name" --query-entry="$$cidr" >/dev/null || firewall-cmd --permanent --ipset="$$name" --add-entry="$$cidr"
+		firewall-cmd --permanent --zone=trusted --query-source="ipset:$$name" >/dev/null || firewall-cmd --permanent --zone=trusted --add-source="ipset:$$name"
+	done
 	firewall-cmd --reload
-	password_file=$(STATE)/samba-initial-password
-	if ! pdbedit -L -u pi >/dev/null 2>&1; then
+	password_file=$$PI_HOME/samba-initial-password
+	if ! pdbedit -L -u "$$PI_USER" >/dev/null 2>&1; then
 		if [[ ! -s $$password_file ]]; then
-			temporary=$$(mktemp "$(STATE)/.samba-password.XXXXXX")
+			temporary=$$(mktemp "$$PI_HOME/.samba-password.XXXXXX")
 			chmod 0600 "$$temporary"
-			umask 077
 			openssl rand -hex 18 > "$$temporary"
+			chown "$$PI_USER:$$PI_GROUP" "$$temporary"
 			mv -f -- "$$temporary" "$$password_file"
 		fi
 		password=$$(<"$$password_file")
-		printf '%s\n%s\n' "$$password" "$$password" | smbpasswd -a -s pi
+		printf '%s\n%s\n' "$$password" "$$password" | smbpasswd -a -s "$$PI_USER"
+		echo 'Samba initial login:'
+		printf '  user: %s\n  password: %s\n  saved in: %s\n' "$$PI_USER" "$$password" "$$password_file"
+		printf 'Change it with: sudo smbpasswd %s\nThen remove ~/samba-initial-password\n' "$$PI_USER"
 	fi
 	systemctl enable --now smb nmb wsdd avahi-daemon
-	if [[ -s $$password_file ]]; then
-		echo 'Samba initial login:'
-		echo '  user: pi'
-		printf '  password: %s\n' "$$(<"$$password_file")"
-		echo 'Change it with: sudo smbpasswd pi'
-		echo 'Then remove the saved initial value: sudo rm -f /var/lib/pi-vm/samba-initial-password'
-	fi
 
-print-deploy-key:
-	echo 'Private-repository deploy public key:'
-	cat "$(PI_HOME)/.ssh/pi-vm-deploy.pub"
-	echo 'After authorizing it, clone with:'
-	echo "  GIT_SSH_COMMAND='ssh -i ~/.ssh/pi-vm-deploy -o IdentitiesOnly=yes' git clone REPOSITORY"
+# Local root-only payload stays at its original /opt location
 
 run-local-payload:
-	if [[ -x $(CONFIG)/local/bootstrap.sh ]]; then
-		PI_VM_LOCAL_DIR=$(CONFIG)/local "$(CONFIG)/local/bootstrap.sh"
+	if [[ -x $(STAGE)/local/bootstrap.sh ]]; then
+		PI_VM_LOCAL_DIR="$(STAGE)/local" "$(STAGE)/local/bootstrap.sh"
 	fi

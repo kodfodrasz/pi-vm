@@ -48,6 +48,37 @@ class SeedTests(unittest.TestCase):
             self.assertIn((ROOT / "assets/Makefile").read_bytes(), payloads)
             self.assertNotIn("/etc/pi-vm/", user_data)
 
+    def test_configurable_cloud_account_upgrade_and_success_only_reboot(self):
+        with tempfile.TemporaryDirectory() as directory:
+            seed.render_seed("personal", "workbox", Path(directory), "developer")
+            user_data = (Path(directory) / "user-data").read_text()
+            self.assertIn('name: "developer"', user_data)
+            self.assertIn('homedir: "/home/developer"', user_data)
+            self.assertNotIn('primary_group:', user_data)
+            self.assertIn('"PI_USER=developer"', user_data)
+            self.assertIn('"PI_VM_CLOUD_INIT=1"', user_data)
+            self.assertIn('package_update: true\npackage_upgrade: true', user_data)
+            self.assertIn('condition: [/opt/pi-vm/reboot-needed.sh]', user_data)
+            self.assertIn('mode: reboot', user_data)
+            self.assertNotIn('__USERNAME_', user_data)
+            for username in ("root", "bad;name", "../user", ""):
+                with self.subTest(username=username), self.assertRaises(ValueError):
+                    seed.render_seed("personal", "workbox", Path(directory), username)
+
+    def test_exact_subagents_configuration(self):
+        settings = json.loads((ROOT / "assets/pi/settings.json").read_text())
+        self.assertEqual(settings["subagents"], {
+            "defaultThinking": "medium",
+            "agentOverrides": {
+                "scout": {"model": "openai-codex/gpt-6-luna", "thinking": "low"},
+                "researcher": {"model": "openai-codex/gpt-6-luna", "thinking": "medium"},
+                "evidence-auditor": {"model": "openai-codex/gpt-6-luna", "thinking": "medium"},
+                "worker": {"model": "openai-codex/gpt-6.1-sol", "thinking": "medium"},
+                "reviewer": {"model": "openai-codex/gpt-6.1-sol", "thinking": "medium"},
+                "oracle": {"model": "openai-codex/gpt-6-astra", "thinking": "high"},
+            },
+        })
+
     def test_authorized_key_inventory_matches_key_blobs(self):
         keys = [line for line in (ROOT / "assets/authorized_keys").read_text().splitlines() if line and not line.startswith("#")]
         fingerprints = []

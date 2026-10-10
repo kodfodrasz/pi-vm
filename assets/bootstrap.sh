@@ -10,6 +10,8 @@ LOG_FILE=$STATE/bootstrap.log
 FAILURE_MARKER=$STATE/bootstrap-failed
 SUCCESS_MARKER=$STATE/bootstrap-complete
 HOSTNAME_FILE=$STATE/hostname
+USER_FILE=$STATE/username
+BOOT_ID_FILE=${PI_VM_BOOT_ID_FILE:-/proc/sys/kernel/random/boot_id}
 MAKEFILE=${PI_VM_MAKEFILE:-$STAGE/Makefile}
 RETRY_WRAPPER=${PI_VM_RETRY_WRAPPER:-/usr/local/sbin/pi-vm-bootstrap}
 recovered_from_failure=false
@@ -55,6 +57,14 @@ validate_inputs() {
     validate_hostname "$candidate"
     VM_HOSTNAME=$candidate
     export VM_HOSTNAME
+    if [[ ${PI_USER+x} != x ]]; then
+        if [[ -f $USER_FILE ]]; then PI_USER=$(<"$USER_FILE"); else PI_USER=pi; fi
+    fi
+    if [[ ! $PI_USER =~ ^[a-z_][a-z0-9_-]{0,31}$ || $PI_USER == root ]]; then
+        echo 'invalid PI_USER (expected a non-root Linux username)' >&2
+        return 1
+    fi
+    export PI_USER
     [[ -f $MAKEFILE ]] || { echo "missing Makefile: $MAKEFILE" >&2; return 1; }
     [[ -r $MAKEFILE ]] || return 1
     [[ -r $STAGE/bootstrap.sh ]] || { echo "missing bootstrap wrapper: $STAGE/bootstrap.sh" >&2; return 1; }
@@ -66,6 +76,10 @@ persist_hostname() {
     chmod 0644 "$temporary"
     printf '%s\n' "$VM_HOSTNAME" > "$temporary"
     mv -f -- "$temporary" "$HOSTNAME_FILE"
+    temporary=$(mktemp "$USER_FILE.XXXXXX")
+    chmod 0644 "$temporary"
+    printf '%s\n' "$PI_USER" > "$temporary"
+    mv -f -- "$temporary" "$USER_FILE"
 }
 
 install_retry_wrapper() {
@@ -110,12 +124,22 @@ fi
 rm -f -- "$FAILURE_MARKER" "$FAILURE_MARKER.tmp" "$SUCCESS_MARKER"
 export recovered_from_failure
 run_make
+reboot_required=false
+selinux_mode=$(getenforce)
+if [[ $selinux_mode != Disabled ]]; then reboot_required=true; fi
 temporary=$(mktemp "$STATE/.bootstrap-complete.XXXXXX")
 chmod 0644 "$temporary"
 {
     printf 'hostname=%s\n' "$VM_HOSTNAME"
+    printf 'boot_id=%s\n' "$(<"$BOOT_ID_FILE")"
+    printf 'reboot_required=%s\n' "$reboot_required"
     printf 'recovered_from_failure=%s\n' "$recovered_from_failure"
 } > "$temporary"
 mv -f -- "$temporary" "$SUCCESS_MARKER"
 rm -f -- "$FAILURE_MARKER"
 printf 'pi-vm bootstrap complete for %s\n' "$VM_HOSTNAME"
+# Cloud-init's final power_state module waits for cloud-final. Manual retries
+# request the same reboot only after the entire graph has succeeded.
+if [[ $reboot_required == true && ${PI_VM_CLOUD_INIT:-0} != 1 ]]; then
+    shutdown -r +1 'pi-vm: reboot to fully disable SELinux'
+fi
