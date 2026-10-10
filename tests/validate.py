@@ -13,7 +13,7 @@ import subprocess
 import unittest
 from unittest.mock import Mock, patch
 
-spec = importlib.util.spec_from_file_location('validator', Path(__file__).parents[1]/'scripts/validate.py')
+spec = importlib.util.spec_from_file_location('validator', Path(__file__).parents[1]/'scripts/build/validate.py')
 v = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(v)
 

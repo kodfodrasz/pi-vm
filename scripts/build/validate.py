@@ -14,7 +14,7 @@ import sys
 import tempfile
 import time
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = Path(__file__).resolve().parents[2]
 
 REMOTE = r'''
 import json, os, pathlib, pwd, subprocess, time, uuid
@@ -327,7 +327,7 @@ def balloon_test(qmp):
 def validate(args):
     instance = args.build / args.instance
     env = dict(os.environ, PI_VM_BUILD=str(args.build))
-    state = subprocess.run([sys.executable, str(ROOT/'scripts/kvm.py'), 'status', args.instance],
+    state = subprocess.run([sys.executable, str(ROOT/'scripts/kvm/kvm.py'), 'status', args.instance],
                            env=env, text=True, capture_output=True, timeout=10)
     if state.returncode:
         raise Failure('instance is not running: ' + state.stdout.strip())

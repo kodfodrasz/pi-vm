@@ -21,7 +21,7 @@ import sys
 import tempfile
 import urllib.request
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 CACHE = Path(os.environ.get("PI_VM_CACHE", Path.home() / ".cache/pi-vm/images"))
 BUILD = Path(os.environ.get("PI_VM_BUILD", ROOT / "build"))
 IMAGE_NAME = "Fedora-Cloud-Base-Generic-44-1.7.x86_64.qcow2"
@@ -163,7 +163,7 @@ def terminate_process(pid_file: Path, disk: Path) -> bool:
 def qmp_powerdown(socket_path: Path) -> None:
     with socket.socket(socket.AF_UNIX) as connection:
         connection.settimeout(10)
-        connection.connect(socket_path)
+        connection.connect(os.fspath(socket_path))
         stream = connection.makefile("rb")
         json.loads(stream.readline())
         for command in ("qmp_capabilities", "system_powerdown"):
@@ -205,6 +205,14 @@ def build_instance(args: argparse.Namespace) -> tuple[Path, Path, Path, int, int
             memory, cpus, disk, port)
 
 
+def network_arguments(bridge: str | None, port: int) -> list[str]:
+    if bridge is None:
+        return ["-netdev", f"user,id=net0,hostfwd=tcp:127.0.0.1:{port}-:22"]
+    if bridge != "br0":
+        raise ValueError("only the authorized br0 bridge is supported")
+    return ["-netdev", "bridge,id=net0,br=br0"]
+
+
 def require_host_prerequisites() -> None:
     for command in ("qemu-img", QEMU, "xorriso"):
         if shutil.which(command) is None:
@@ -236,7 +244,8 @@ def start(args: argparse.Namespace) -> None:
             if shutil.disk_usage(Path(args.build)).free < 2_000_000_000:
                 raise RuntimeError("insufficient free space for VM storage")
             if not seed.exists():
-                run([sys.executable, str(ROOT / "scripts/seed.py"), args.instance, "--output", str(seed)])
+                run([sys.executable, str(ROOT / "scripts/build/seed.py"), args.instance,
+                     "--hostname", args.hostname, "--output", str(seed)])
             partial = instance / "disk.qcow2.part"
             partial.unlink(missing_ok=True)
             run(["qemu-img", "create", "-f", "qcow2", "-F", "qcow2", "-b", str(base), str(partial), disk_size])
@@ -252,14 +261,17 @@ def start(args: argparse.Namespace) -> None:
                    "-smp", str(cpus), "-m", str(memory), "-display", "none",
                    "-serial", f"file:{instance / 'serial.log'}", "-daemonize", "-pidfile", str(pid_file),
                    "-qmp", f"unix:{qmp},server=on,wait=off", "-drive", f"file={disk},if=virtio,format=qcow2",
-                   "-drive", f"file={seed},media=cdrom,readonly=on", "-netdev", f"user,id=net0,hostfwd=tcp:127.0.0.1:{port}-:22",
+                   "-drive", f"file={seed},media=cdrom,readonly=on", *network_arguments(args.bridge, port),
                    "-device", "virtio-net-pci,netdev=net0", "-device", "virtio-balloon-pci"]
         with (instance / "qemu.log").open("ab") as log:
             subprocess.run(options, cwd=instance, stdout=log, stderr=log, check=True, close_fds=True)
         for artifact in (instance / "qemu.log", instance / "serial.log", pid_file):
             if artifact.exists():
                 os.chmod(artifact, 0o600)
-    print(f"Started {args.instance}. SSH: ssh -p {port} pi@127.0.0.1")
+    if args.bridge:
+        print(f"Started {args.instance} on {args.bridge}. SSH: ssh pi@<guest-LAN-IP>")
+    else:
+        print(f"Started {args.instance}. SSH: ssh -p {port} pi@127.0.0.1")
 
 
 def stop_or_status(args: argparse.Namespace) -> int:
@@ -288,8 +300,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("instance", nargs="?")
     parser.add_argument("--memory", type=int, default=2048)
     parser.add_argument("--cpus", type=int, default=2)
+    parser.add_argument("--hostname", default="pipette")
     parser.add_argument("--disk", default="16G")
     parser.add_argument("--ssh-port", type=int, default=2222)
+    parser.add_argument("--bridge", choices=("br0",), help="attach the guest to the authorized br0 LAN bridge")
     parser.add_argument("--cache", default=str(CACHE))
     parser.add_argument("--build", default=str(BUILD))
     parser.add_argument("--force", action="store_true")

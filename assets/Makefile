@@ -29,12 +29,12 @@ BOOTSTRAP_BIN ?= /usr/local/sbin/pi-vm-bootstrap
 
 PACKAGES := avahi cloud-utils-growpart curl fastfetch fd-find firewalld fish gcc gcc-c++ git \
 	hyperv-daemons jq make micro nodejs npm openssl podman python3 ripgrep rsync samba \
-	samba-client tmux unzip util-linux vim-enhanced wsdd grubby
+	samba-client tmux unzip util-linux vim-enhanced wsdd grubby mc awscli2 opentofu ansible
 
 # Bootstrap ordering and package reconciliation
 
-.PHONY: bootstrap validate-input set-hostname install-packages remove-azure \
-	install-starship configure-system configure-user configure-file-sharing run-local-payload
+.PHONY: bootstrap validate-input set-hostname install-packages install-powershell \
+	remove-azure install-starship configure-system configure-user configure-file-sharing run-local-payload
 
 bootstrap: run-local-payload
 run-local-payload: configure-file-sharing
@@ -43,6 +43,8 @@ configure-user: configure-system
 configure-system: install-starship
 install-starship: remove-azure
 remove-azure: install-packages
+install-powershell: install-packages
+install-starship: install-powershell
 install-packages: set-hostname | $(BOOTSTRAP_BIN)
 set-hostname: validate-input
 
@@ -110,16 +112,19 @@ $(STARSHIP_BIN): $(STARSHIP_ARCHIVE) | install-packages
 
 install-starship: $(STARSHIP_BIN)
 
+install-powershell: $(STAGE)/install-powershell.sh
+	bash "$<"
+
 
 # System destinations are installed directly from the staged seed
 
-$(SSH_CONFIG)/10-pi-vm.conf: $(STAGE)/config/sshd.conf | install-packages
+$(SSH_CONFIG)/10-pi-vm.conf: $(STAGE)/config/sshd.conf | install-powershell
 	install -D -m 0644 -o root -g root "$<" "$@"
 
-$(SAMBA_CONFIG): $(STAGE)/config/smb.conf | install-packages
+$(SAMBA_CONFIG): $(STAGE)/config/smb.conf | install-powershell
 	install -D -m 0644 -o root -g root "$<" "$@"
 
-$(AVAHI_SERVICES)/samba.service: $(STAGE)/config/avahi-samba.service | install-packages
+$(AVAHI_SERVICES)/samba.service: $(STAGE)/config/avahi-samba.service | install-powershell
 	install -D -m 0644 -o root -g root "$<" "$@"
 
 configure-system: $(SSH_CONFIG)/10-pi-vm.conf $(SAMBA_CONFIG) $(AVAHI_SERVICES)/samba.service

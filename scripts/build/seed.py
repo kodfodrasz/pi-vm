@@ -1,9 +1,6 @@
 #!/usr/bin/env -S uv run --script
 # /// script
 # requires-python = ">=3.11"
-# dependencies = [
-#   "pywin32>=306; sys_platform == 'win32'",
-# ]
 # ///
 """Render and publish a Fedora NoCloud seed ISO without a shell wrapper."""
 from __future__ import annotations
@@ -13,12 +10,11 @@ import base64
 import json
 import os
 import re
-import shutil
 import subprocess
 import tempfile
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 ASSETS = ROOT / "assets"
 LOCAL = ROOT / "local"
 
@@ -41,6 +37,7 @@ EMBED = {
     "config/sshd.conf": (ASSETS / "config/sshd.conf", "0644", "root:root"),
     "config/sudoers": (ASSETS / "config/sudoers", "0440", "root:root"),
     "Makefile": (ASSETS / "Makefile", "0644", "root:root"),
+    "install-powershell.sh": (ASSETS / "install-powershell.sh", "0755", "root:root"),
     "user-context.sh": (ASSETS / "user-context.sh", "0644", "root:root"),
     "install-user.sh": (ASSETS / "install-user.sh", "0644", "root:root"),
     "write-user-readme.sh": (ASSETS / "write-user-readme.sh", "0644", "root:root"),
@@ -122,43 +119,9 @@ def render_seed(instance_id: str, hostname: str, output_dir: Path, username: str
 
 def build_iso(files: Path, output: Path) -> None:
     if os.name == "nt":
-        try:
-            import pythoncom
-            import win32com.client
-        except ImportError as exc:
-            raise RuntimeError("Windows seed creation needs uv's pywin32 dependency") from exc
-        pythoncom.CoInitialize()
-        try:
-            image = win32com.client.Dispatch("IMAPI2FS.MsftFileSystemImage")
-            image.ChooseImageDefaultsForMediaType(12)  # IMAPI_MEDIA_TYPE_DISK
-            image.FileSystemsToCreate = 3  # ISO9660 | Joliet | UDF
-            image.VolumeName = "cidata"
-            image.Root.AddTree(str(files), False)
-            stream = image.CreateResultImage().ImageStream
-            stream = query_istream(stream, pythoncom.IID_IStream)
-            write_istream(stream, output)
-        finally:
-            pythoncom.CoUninitialize()
-        return
+        raise RuntimeError("seed ISO creation is Linux-only and requires xorriso")
     subprocess.run(["xorriso", "-as", "mkisofs", "-volid", "CIDATA", "-joliet", "-rock",
                     "-o", str(output), str(files)], check=True)
-
-
-def query_istream(stream, iid):
-    return stream.QueryInterface(iid)
-
-
-def write_istream(stream, output: Path) -> None:
-    with output.open("xb") as destination:
-        while True:
-            chunk = stream.Read(1024 * 1024)
-            if isinstance(chunk, tuple):
-                chunk = chunk[0]
-            if not chunk:
-                break
-            destination.write(bytes(chunk))
-    if output.stat().st_size == 0:
-        raise RuntimeError("IMAPI2FS produced an empty ISO")
 
 
 def publish_iso(instance_id: str, hostname: str, output: Path, username: str = "pi") -> Path:

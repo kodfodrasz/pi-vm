@@ -2,7 +2,7 @@
 # /// script
 # requires-python = ">=3.11"
 # ///
-"""Offline checks for the Python-only prototype."""
+"""Offline checks for shared seed rendering and Linux host tooling."""
 from __future__ import annotations
 
 import argparse
@@ -28,9 +28,8 @@ def load(name: str, path: Path):
     return module
 
 
-seed = load("seed", ROOT / "scripts/seed.py")
-kvm = load("kvm", ROOT / "scripts/kvm.py")
-hyperv = load("hyperv", ROOT / "scripts/hyperv.py")
+seed = load("seed", ROOT / "scripts/build/seed.py")
+kvm = load("kvm", ROOT / "scripts/kvm/kvm.py")
 class SeedTests(unittest.TestCase):
     def test_render_stages_everything_under_opt_pi_vm(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -109,9 +108,9 @@ class SeedTests(unittest.TestCase):
             root = Path(directory)
             import shutil
             shutil.copytree(ROOT / "assets", root / "assets", ignore=shutil.ignore_patterns("__pycache__"))
-            renderer = root / "scripts"
-            renderer.mkdir()
-            shutil.copyfile(ROOT / "scripts/seed.py", renderer / "seed.py")
+            renderer = root / "scripts" / "build"
+            renderer.mkdir(parents=True)
+            shutil.copyfile(ROOT / "scripts/build/seed.py", renderer / "seed.py")
             text_files = [path for path in (root / "assets").rglob("*")
                           if path.is_file() and path.name != "authorized_keys"]
             for path in text_files:
@@ -155,24 +154,11 @@ class BootstrapTests(unittest.TestCase):
 
 
 class SeedPublicationTests(unittest.TestCase):
-    def test_istream_query_and_readback_use_native_interface(self):
-        class Stream:
-            def __init__(self):
-                self.calls = 0
-                self.iid = None
-            def QueryInterface(self, iid):
-                self.iid = iid
-                return self
-            def Read(self, size):
-                self.calls += 1
-                return b"iso" if self.calls == 1 else b""
-        stream = Stream()
-        self.assertIs(seed.query_istream(stream, "IStream"), stream)
-        self.assertEqual(stream.iid, "IStream")
-        with tempfile.TemporaryDirectory() as directory:
-            output = Path(directory) / "iso"
-            seed.write_istream(stream, output)
-            self.assertEqual(output.read_bytes(), b"iso")
+    def test_seed_builder_has_no_windows_python_dependencies(self):
+        source = (ROOT / "scripts/build/seed.py").read_text()
+        self.assertNotIn("pywin32", source)
+        self.assertNotIn("IStream", source)
+        self.assertIn("Linux-only", source)
 
     def test_local_binary_payload_is_byte_preserved(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -257,7 +243,7 @@ class SafetyTests(unittest.TestCase):
             (instance / "disk.qcow2").write_bytes(b"disk")
             (instance / "seed.iso").write_bytes(b"seed")
             args = argparse.Namespace(action="start", instance="launch-test", memory=2048,
-                                      cpus=2, disk="16G", ssh_port=2222,
+                                      cpus=2, hostname="pipette", disk="16G", ssh_port=2222, bridge=None,
                                       cache=str(root / "cache"), build=str(build), force=False)
             calls = []
             old_prerequisites = kvm.require_host_prerequisites
@@ -286,6 +272,14 @@ class SafetyTests(unittest.TestCase):
             self.assertEqual(argv[argv.index("-m") + 1], "2048")
             self.assertTrue(any("hostfwd=tcp:127.0.0.1:2222-:22" in value for value in argv))
             self.assertNotEqual(argv[0], sys.executable)
+
+    def test_bridge_network_is_opt_in_and_limited_to_br0(self):
+        self.assertEqual(kvm.network_arguments(None, 2222),
+                         ["-netdev", "user,id=net0,hostfwd=tcp:127.0.0.1:2222-:22"])
+        self.assertEqual(kvm.network_arguments("br0", 2222),
+                         ["-netdev", "bridge,id=net0,br=br0"])
+        with self.assertRaisesRegex(ValueError, "only the authorized br0"):
+            kvm.network_arguments("virbr0", 2222)
 
     def test_resource_contract(self):
         self.assertEqual(kvm.valid_resources("0000512", "0001", "0005120M", "02222"),
@@ -322,54 +316,23 @@ class SafetyTests(unittest.TestCase):
             (process / "cmdline").write_bytes(b"qemu-system-x86_64\0-drive\0file=" + str(disk).encode() + b",file=/other\0")
             self.assertFalse(kvm.qemu_matches(123, disk, root / "proc"))
 
-    def test_invalid_image_never_passes_without_pinned_bytes(self):
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "image.qcow2"
-            path.write_bytes(b"not an image")
-            self.assertFalse(hyperv.verified_fixed_vhd(path))
-
-
-class HyperVSafetyTests(unittest.TestCase):
-    def test_cache_lock_refuses_concurrent_operation(self):
-        with tempfile.TemporaryDirectory() as directory:
-            lock = Path(directory) / ".download.lock"
-            with hyperv.exclusive_cache_lock(lock):
-                with self.assertRaises(RuntimeError):
-                    with hyperv.exclusive_cache_lock(lock):
-                        pass
-
-    def test_cache_space_is_checked_before_download(self):
-        with tempfile.TemporaryDirectory() as directory:
-            old_usage = hyperv.shutil.disk_usage
-            try:
-                hyperv.shutil.disk_usage = lambda path: type("Usage", (), {"free": 1})()
-                with self.assertRaisesRegex(RuntimeError, "12 GiB"):
-                    hyperv.download_and_extract(Path(directory))
-            finally:
-                hyperv.shutil.disk_usage = old_usage
-
-
 class EntrypointTests(unittest.TestCase):
     def test_python_entrypoints_parse(self):
-        for path in (ROOT / "scripts/seed.py", ROOT / "scripts/kvm.py", ROOT / "scripts/hyperv.py", ROOT / "scripts/validate.py"):
+        for path in (ROOT / "scripts/build/seed.py", ROOT / "scripts/kvm/kvm.py", ROOT / "scripts/build/validate.py"):
             result = subprocess.run([sys.executable, str(path), "--help"], text=True, capture_output=True)
             self.assertEqual(result.returncode, 0, (path, result.stderr))
 
-    def test_hyperv_cli_help_describes_read_only_scope(self):
-        result = subprocess.run([sys.executable, str(ROOT / "scripts/hyperv.py"), "--help"],
+    def test_kvm_cli_help_exposes_hostname_and_br0_network_options(self):
+        result = subprocess.run([sys.executable, str(ROOT / "scripts/kvm/kvm.py"), "--help"],
                                 text=True, capture_output=True, check=True)
-        self.assertIn("read-only status", result.stdout)
-        self.assertNotIn("inspect or control", result.stdout)
+        self.assertIn("--hostname", result.stdout)
+        self.assertIn("--bridge {br0}", result.stdout)
 
-    def test_hyperv_mutation_is_explicitly_disabled(self):
-        settings = type("Settings", (), {"action": "stop"})()
-        with self.assertRaises(NotImplementedError):
-            hyperv.start_stop_status(settings)
-
-    def test_no_shell_or_powershell_tooling_remains(self):
-        forbidden = list((ROOT / "scripts").glob("*.sh")) + list((ROOT / "scripts").glob("*.ps1"))
-        forbidden += list((ROOT / "tests").glob("*.sh")) + list((ROOT / "tests").glob("*.ps1"))
-        self.assertEqual(forbidden, [])
+    def test_entrypoints_use_latest_layout_without_compatibility_duplicates(self):
+        self.assertFalse((ROOT / "scripts/seed.py").exists())
+        self.assertFalse((ROOT / "scripts/validate.py").exists())
+        self.assertFalse((ROOT / "scripts/kvm.py").exists())
+        self.assertFalse((ROOT / "scripts/hyperv.py").exists())
         self.assertFalse((ROOT / "assets/bootstrap.py").exists())
 
 

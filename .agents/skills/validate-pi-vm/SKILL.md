@@ -18,7 +18,7 @@ first. Resolve script paths from that root.
    for bootstrap. Check cloud-init status, schema, and the success marker.
    If it fails, read the log before changing anything.
 5. Run `make validate INSTANCE=ID SSH_PORT=PORT` for the basic guest checks.
-   For optional checks and a report, run `scripts/validate.py` directly with
+   For optional checks and a report, run `scripts/build/validate.py` directly with
    `--nested --balloon --report build/ID/validation.json`. Use a trusted
    `--known-hosts` file when needed. Never silently skip an option.
 6. Check balloon support with QMP. Save the initial memory value, request a
@@ -29,6 +29,7 @@ first. Resolve script paths from that root.
 9. Stop only the test VMs you created. Keep logs under `build/`. Write a short
    result with commands, passes, failures, skips, and the tested file state.
 
-Linux can parse PowerShell, compile its C# helper, and inspect a generated VHD.
-It cannot prove Windows IMAPI2FS or Hyper-V works. Mark those as untested until
-someone runs them on Windows. Never copy private SSH keys or Pi credentials.
+Linux can parse the PowerShell scripts and run the offline Hyper-V fixture, but
+it cannot prove native Hyper-V cmdlets, Windows path/reparse behavior, image
+conversion, or guest boot. Mark those as untested until someone runs them on
+Windows. Never copy private SSH keys or Pi credentials.

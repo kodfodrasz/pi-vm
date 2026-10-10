@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import json
 import os
 import pty
 import select
@@ -72,13 +73,24 @@ class GuestMakeTests(unittest.TestCase):
             fake_bin = root / "bin"
             fake_bin.mkdir()
             fake_log = root / "commands"
+            powershell_api = root / "powershell-api.json"
+            powershell_api.write_text(json.dumps({
+                "tag_name": "v7.6.6",
+                "draft": False,
+                "prerelease": False,
+                "assets": [{
+                    "name": "powershell-7.6.6-1.rh.x86_64.rpm",
+                    "browser_download_url": "https://github.com/PowerShell/PowerShell/releases/download/v7.6.6/powershell-7.6.6-1.rh.x86_64.rpm",
+                    "digest": "sha256:0eb3e36bfb24dcd9bb1d1bece1531216b59539a8fde17ee80224af0653c92aa3",
+                }],
+            }))
             fake = fake_bin / "fake-command"
             fake.write_text(
                 "#!/usr/bin/bash\n"
                 "name=${0##*/}\n"
                 "printf 'start:%s:%s:%s\\n' \"$PI_FAKE_PASS\" \"$name\" \"$*\" >> \"$PI_FAKE_LOG\"\n"
                 "case $name in\n"
-                "  rpm) exit 1 ;;\n"
+                "  rpm) if [[ $1 == -qp ]]; then printf 'powershell 7.6.6 1.rh x86_64\\n'; elif [[ $1 == -q && -e $PI_FAKE_POWERSHELL_INSTALLED ]]; then printf '7.6.6-1.rh.x86_64\\n'; else exit 1; fi ;;\n"
                 "  id) [[ $1 != -gn ]] || printf 'staff\\n'; [[ -z ${PI_FAKE_MISSING_USER:-} ]] ;;\n"
                 "  getent) printf 'dev:x:1000:1000::%s:/bin/bash\\n' \"$PI_FAKE_HOME\" ;;\n"
                 "  pdbedit) [[ -e $PI_FAKE_ACCOUNT ]] ;;\n"
@@ -90,10 +102,10 @@ class GuestMakeTests(unittest.TestCase):
                 "    *--query-entry=*|*--query-source=*) grep -Fxq \"$*\" \"$PI_FAKE_RULES\" 2>/dev/null ;;\n"
                 "    *--add-entry=*|*--add-source=*) printf '%s\\n' \"${*//--add-/--query-}\" >> \"$PI_FAKE_RULES\" ;;\n"
                 "  esac ;;\n"
-                "  dnf) [[ -z ${PI_FAKE_DELAY_DNF:-} ]] || sleep 0.05; if [[ -n ${PI_FAKE_FAIL_DNF:-} && -e $PI_FAKE_FAIL_DNF ]]; then rm -f -- $PI_FAKE_FAIL_DNF; exit 1; fi; printf 'done:%s:dnf:%s\\n' \"$PI_FAKE_PASS\" \"$*\" >> \"$PI_FAKE_LOG\" ;;\n"
-                "  curl) while [[ $# -gt 0 ]]; do [[ $1 == -o ]] && { shift; printf archive > \"$1\"; }; shift; done; printf 'done:%s:curl:%s\\n' \"$PI_FAKE_PASS\" \"$*\" >> \"$PI_FAKE_LOG\" ;;\n"
+                "  dnf) [[ -z ${PI_FAKE_DELAY_DNF:-} ]] || sleep 0.05; if [[ -n ${PI_FAKE_FAIL_DNF:-} && -e $PI_FAKE_FAIL_DNF ]]; then rm -f -- $PI_FAKE_FAIL_DNF; exit 1; fi; [[ $* != *powershell-7.6.6-1.rh.x86_64.rpm ]] || : > \"$PI_FAKE_POWERSHELL_INSTALLED\"; printf 'done:%s:dnf:%s\\n' \"$PI_FAKE_PASS\" \"$*\" >> \"$PI_FAKE_LOG\" ;;\n"
+                "  curl) url=; output=; while [[ $# -gt 0 ]]; do case $1 in -o) shift; output=$1 ;; https://api.github.com/*) url=$1 ;; https://github.com/*powershell-7.6.6-1.rh.x86_64.rpm) url=$1 ;; esac; shift; done; if [[ $url == https://api.github.com/* ]]; then cp \"$PI_FAKE_POWERSHELL_API\" \"$output\"; else printf archive > \"$output\"; fi; printf 'done:%s:curl:%s\\n' \"$PI_FAKE_PASS\" \"$url\" >> \"$PI_FAKE_LOG\" ;;\n"
                 "  tar) printf starship ;;\n"
-                "  sha256sum) ;;\n"
+                "  sha256sum) printf '0eb3e36bfb24dcd9bb1d1bece1531216b59539a8fde17ee80224af0653c92aa3  %s\\n' \"${@: -1}\" ;;\n"
                 "  openssl) printf '0123456789abcdef\\n' ;;\n"
                 "  su) shift; shift; shift; shift; script=$1; shift; exec /bin/sh -c \"$script\" \"$@\" ;;\n"
                 "  ssh-keygen) while [[ $# -gt 0 ]]; do if [[ $1 == -f ]]; then shift; printf key > \"$1\"; printf pub > \"$1.pub\"; fi; shift; done ;;\n"
@@ -106,7 +118,7 @@ class GuestMakeTests(unittest.TestCase):
             for command in ("rpm", "pdbedit", "id", "curl", "tar", "sha256sum", "openssl",
                             "su", "getent", "ssh-keygen", "setsid", "pi", "grubby", "install", "chown", "hostnamectl", "dnf", "systemctl",
                             "usermod", "visudo", "loginctl", "chsh", "testparm",
-                            "firewall-cmd", "smbpasswd"):
+                            "firewall-cmd", "smbpasswd", "pwsh"):
                 (fake_bin / command).symlink_to(fake)
             # The fake shell's install/chown do not apply user names, but all
             # writes remain below this temporary tree.
@@ -136,6 +148,8 @@ class GuestMakeTests(unittest.TestCase):
                 "PI_FAKE_PASSWORD_OWNER": str(root / "password-owner"),
                 "PI_FAKE_SETS": str(root / "ipsets"),
                 "PI_FAKE_RULES": str(root / "rules"),
+                "PI_FAKE_POWERSHELL_API": str(powershell_api),
+                "PI_FAKE_POWERSHELL_INSTALLED": str(root / "powershell-installed"),
                 "SELINUX_CONFIG": str(selinux),
                 "PI_FAKE_PASS": "failed",
                 "PI_FAKE_DELAY_DNF": "1",
