@@ -89,6 +89,47 @@ class SeedTests(unittest.TestCase):
         inventory = [line for line in (ROOT / "assets/public-key-identities.txt").read_text().splitlines() if line.startswith("SHA256:")]
         self.assertEqual(fingerprints, inventory)
 
+    def test_hostname_bounds_and_render_only_argument_orders(self):
+        fqdn = "pipacs.local.kodfodrasz.net"
+        exact_total_limit = "a" * 62 + ".b"
+        for hostname in ("pipacs", fqdn, "a-b.c1", "a" * 63, exact_total_limit):
+            with self.subTest(hostname=hostname):
+                seed.valid_hostname(hostname)
+        rejected = {
+            "a" * 64: "at most 63",
+            "a" * 60 + "." + "b" * 4 + "c": "64 characters",
+            ".pipacs": "empty",
+            "pipacs.": "empty",
+            "pipacs..local": "empty",
+            "pipacs_local": "ASCII letters",
+            "pipacs local": "ASCII letters",
+            "pipacs$HOME": "ASCII letters",
+            "-pipacs": "hyphens",
+            "pipacs-": "hyphens",
+        }
+        for hostname, expected in rejected.items():
+            with self.subTest(hostname=hostname):
+                with self.assertRaisesRegex(ValueError, expected):
+                    seed.valid_hostname(hostname)
+        with tempfile.TemporaryDirectory() as directory:
+            for index, argv in enumerate((
+                ["pipacs", "--hostname", fqdn, "--render-only"],
+                ["--hostname", fqdn, "--render-only", "pipacs"],
+            )):
+                output = Path(directory) / f"render-{index}"
+                if index == 0:
+                    command = [sys.executable, str(ROOT / "scripts/build/seed.py"), *argv, str(output)]
+                else:
+                    command = [sys.executable, str(ROOT / "scripts/build/seed.py"),
+                               "--hostname", fqdn, "--render-only", str(output), "pipacs"]
+                subprocess.run(
+                    command,
+                    check=True,
+                    text=True,
+                )
+                self.assertIn(f'hostname: "{fqdn}"', (output / "user-data").read_text())
+                self.assertIn(f"local-hostname: \"{fqdn}\"", (output / "meta-data").read_text())
+
     def test_render_rejects_bad_identifiers_and_symlink_local_payload(self):
         with tempfile.TemporaryDirectory() as directory:
             with self.assertRaises(ValueError):
@@ -134,6 +175,84 @@ class SeedTests(unittest.TestCase):
 
 
 class BootstrapTests(unittest.TestCase):
+    @unittest.skipUnless(os.geteuid() == 0, "bootstrap validation fixture requires root")
+    def test_hostname_validation_matches_make_and_preserves_fqdn_retry(self):
+        fqdn = "pipacs.local.kodfodrasz.net"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            stage = root / "stage"
+            stage.mkdir()
+            shutil.copyfile(WRAPPER, stage / "bootstrap.sh")
+            calls = root / "calls"
+            (stage / "Makefile").write_text(
+                "bootstrap:\n"
+                f"\tprintf '%s\\n' \"$$VM_HOSTNAME\" > {calls}\n"
+            )
+            fake_bin = root / "bin"
+            fake_bin.mkdir()
+            (fake_bin / "getenforce").write_text("#!/bin/sh\nprintf 'Disabled\\n'\n")
+            (fake_bin / "getenforce").chmod(0o755)
+            environment = {
+                **os.environ,
+                "PATH": f"{fake_bin}:{os.environ['PATH']}",
+                "PI_VM_STAGE": str(stage),
+                "PI_VM_STATE": str(root / "state"),
+                "PI_VM_MAKEFILE": str(stage / "Makefile"),
+                "PI_VM_RETRY_WRAPPER": str(root / "retry-wrapper"),
+                "PI_VM_BOOT_ID_FILE": str(root / "boot-id"),
+                "PI_VM_CLOUD_INIT": "1",
+                "VM_HOSTNAME": fqdn,
+                "PI_USER": "developer",
+            }
+            (root / "boot-id").write_text("offline-boot\n")
+            accepted = subprocess.run([str(WRAPPER)], env=environment, text=True, capture_output=True)
+            self.assertEqual(accepted.returncode, 0, accepted.stdout + accepted.stderr)
+            self.assertEqual(calls.read_text(), fqdn + "\n")
+            self.assertEqual((root / "state" / "hostname").read_text(), fqdn + "\n")
+
+            invalid = dict(environment, VM_HOSTNAME="pipacs$HOME")
+            rejected = subprocess.run([str(WRAPPER)], env=invalid, text=True, capture_output=True)
+            self.assertNotEqual(rejected.returncode, 0)
+            self.assertIn("ASCII letters", rejected.stdout + rejected.stderr)
+            self.assertEqual(calls.read_text(), fqdn + "\n")
+
+            make_stage = root / "make-stage"
+            shutil.copytree(ROOT / "assets", make_stage)
+            home = root / "home" / "developer"
+            home.mkdir(parents=True)
+            make_bin = root / "make-bin"
+            make_bin.mkdir()
+            (make_bin / "id").write_text(
+                "#!/bin/sh\n"
+                "if [ \"$1\" = -gn ]; then printf 'staff\\n'; fi\n"
+            )
+            (make_bin / "getent").write_text(
+                f"#!/bin/sh\nprintf 'developer:x:1000:1000::%s:/bin/bash\\n' '{home}'\n"
+            )
+            for command in ("id", "getent"):
+                (make_bin / command).chmod(0o755)
+            make_environment = dict(
+                environment,
+                PATH=f"{make_bin}:{os.environ['PATH']}",
+                STAGE=str(make_stage),
+                PI_USER="developer",
+                VM_HOSTNAME=fqdn,
+            )
+            direct = subprocess.run(
+                ["make", "--no-print-directory", "-f", str(MAKEFILE), "validate-input"],
+                env=make_environment, text=True, capture_output=True,
+            )
+            self.assertEqual(direct.returncode, 0, direct.stderr)
+            for invalid_hostname, message in (("pipacs..local", "empty"), ("pipacs$HOME", "ASCII letters")):
+                with self.subTest(invalid_hostname=invalid_hostname):
+                    direct_rejected = subprocess.run(
+                        ["make", "--no-print-directory", "-f", str(MAKEFILE), "validate-input"],
+                        env=dict(make_environment, VM_HOSTNAME=invalid_hostname),
+                        text=True, capture_output=True,
+                    )
+                    self.assertNotEqual(direct_rejected.returncode, 0)
+                    self.assertIn(message, direct_rejected.stderr)
+
     def test_guest_scripts_parse_and_wrapper_uses_make(self):
         result = subprocess.run(["bash", "-n", str(ROOT / "assets/bootstrap.sh")],
                                 text=True, capture_output=True)

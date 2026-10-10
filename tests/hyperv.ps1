@@ -6,6 +6,9 @@ New-Item -ItemType Directory -Force -Path $work | Out-Null
 # An isolated module supplies all hyperv, storage, hash, and network commands.
 # Production has no environment-variable switch to bypass its module import.
 $oldModulePath = $env:PSModulePath
+$oldPath = $env:PATH
+$oldProgramFiles = $env:ProgramFiles
+$oldProgramFilesX86 = ${env:ProgramFiles(x86)}
 $modules = Join-Path $work 'modules'
 $module = Join-Path $modules 'Hyper-V'
 New-Item -ItemType Directory -Force -Path $module | Out-Null
@@ -60,8 +63,22 @@ function New-Case {
         Cache = $script:cache
         ExtractExit = 0
         ExpandedLength = 5368709632L
+        CheckpointType = $null
+        GuestServiceEnabled = $false
+        OtherIntegrationEnabled = $true
+        SevenZipCommandPath = $null
+        ExtractorPath = $null
     }
     Set-PiVmMockState $script:state
+
+    # The fixture exposes 7z as a function. This script adapter gives
+    # Get-Command an Application result while retaining the offline fake.
+    $script:sevenZipPath = Join-Path $script:caseDir '7z-adapter.ps1'
+    Set-Content -LiteralPath $script:sevenZipPath -Value @'
+Set-PiVmMockExtractorPath $PSCommandPath
+7z @args
+'@
+    $script:state.SevenZipCommandPath = $script:sevenZipPath
 
     if ($Prepare) {
         New-Item -ItemType Directory -Path $script:build, $script:cache | Out-Null
@@ -117,6 +134,30 @@ function Assert-TextUnchanged {
     param($Path, $Expected)
 
     Assert ((Get-Content -LiteralPath $Path -Raw) -eq $Expected) "Changed protected file: $Path"
+}
+
+function New-DefaultSevenZipExecutable {
+    param($Path, [int]$ExitCode = 0, [Int64]$Length = 5368709632L)
+
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $Path) | Out-Null
+    $content = @'
+#!/bin/sh
+if [ MOCK_EXIT -ne 0 ]; then
+    exit MOCK_EXIT
+fi
+output=''
+for arg in "$@"; do
+    case "$arg" in
+        -o*) output="${arg#-o}" ;;
+    esac
+done
+mkdir -p "$output"
+printf candidate > "$output/Fedora-Cloud-Base-Azure-44-1.7.x86_64.vhdfixed"
+truncate -s MOCK_LENGTH "$output/Fedora-Cloud-Base-Azure-44-1.7.x86_64.vhdfixed"
+'@
+    $content = $content.Replace('MOCK_EXIT', [string]$ExitCode).Replace('MOCK_LENGTH', [string]$Length)
+    [IO.File]::WriteAllText($Path, $content)
+    & chmod +x $Path
 }
 
 try {
@@ -178,6 +219,61 @@ try {
     Assert-No-Instance
 
     # Windows consumes a prepared Linux ISO and never invokes Python or uv.
+    # Discovery prefers a PATH application and does not rewrite PATH.
+    New-Case
+    Remove-Item (Join-Path $cache '*.vhd')
+    $fallbackRoot = Join-Path $caseDir 'Program Files fallback'
+    $fallback = Join-Path $fallbackRoot '7-Zip/7z.exe'
+    New-DefaultSevenZipExecutable $fallback 23
+    $env:ProgramFiles = $fallbackRoot
+    ${env:ProgramFiles(x86)} = Join-Path $caseDir 'missing-x86'
+    $pathBefore = $env:PATH
+    & $scriptPath @script:options
+    Assert ($state.ExtractorPath -eq $script:sevenZipPath) 'PATH 7z application was not preferred'
+    Assert ($env:PATH -eq $pathBefore -and $env:PATH -eq $oldPath) '7z discovery changed PATH'
+
+    # The standard installer location is accepted, including spaces in its path.
+    New-Case
+    Remove-Item (Join-Path $cache '*.vhd')
+    $defaultRoot = Join-Path $caseDir 'Program Files with spaces'
+    $default = Join-Path $defaultRoot '7-Zip/7z.exe'
+    New-DefaultSevenZipExecutable $default
+    $script:state.SevenZipCommandPath = $null
+    $env:ProgramFiles = $defaultRoot
+    ${env:ProgramFiles(x86)} = Join-Path $caseDir 'missing-x86'
+    $pathBefore = $env:PATH
+    & $scriptPath @script:options
+    Assert (Test-Path (Join-Path $cache 'Fedora-Cloud-Base-Azure-44-1.7.x86_64.vhd')) 'Default 7z path was not invoked'
+    Assert ($env:PATH -eq $pathBefore -and $env:PATH -eq $oldPath) 'Default 7z discovery changed PATH'
+
+    # A valid expanded cache and a restart do not require an extractor.
+    New-Case
+    $script:state.SevenZipCommandPath = $null
+    $env:ProgramFiles = Join-Path $caseDir 'missing-program-files'
+    ${env:ProgramFiles(x86)} = Join-Path $caseDir 'missing-program-files-x86'
+    & $scriptPath @script:options
+    Assert ($state.VM -and -not $state.ExtractorPath) 'Valid cache unexpectedly required 7z'
+    $state.VM.State = 'Off'
+    $state.Calls.Clear()
+    & $scriptPath @script:options
+    Assert ($state.Calls.Count -eq 1 -and $state.Calls[0] -eq 'start') 'Restart required 7z or rebuilt the VM'
+    Assert ($env:PATH -eq $oldPath) 'Cached/restart path changed PATH'
+
+    # Missing 7z fails during preflight, before download or VM creation.
+    New-Case
+    Remove-Item (Join-Path $cache '*.vhd')
+    $script:state.SevenZipCommandPath = $null
+    $env:ProgramFiles = Join-Path $caseDir 'missing-program-files'
+    ${env:ProgramFiles(x86)} = Join-Path $caseDir 'missing-program-files-x86'
+    $pathBefore = $env:PATH
+    Expect-Failure 'Install 7-Zip'
+    Assert (-not $state.VM -and -not $state.Calls.Contains('download') -and
+        -not $state.Calls.Contains('new-vm')) 'Missing 7z caused external or VM work'
+    Assert ($env:PATH -eq $pathBefore -and $env:PATH -eq $oldPath) 'Missing 7z discovery changed PATH'
+
+    $env:ProgramFiles = $oldProgramFiles
+    ${env:ProgramFiles(x86)} = $oldProgramFilesX86
+
     New-Case $false
     $script:options.SeedIso = Join-Path $caseDir 'empty.iso'
     [IO.File]::WriteAllText($script:options.SeedIso,'')
@@ -211,12 +307,139 @@ try {
         Assert ($state.Calls.Count -eq 0) 'Ancestor symlink caused lifecycle work'
     }
 
-    New-Case $false
-    New-Item -ItemType Directory -Path $build, $cache, (Join-Path $build 'test') | Out-Null
-    [IO.File]::WriteAllText((Join-Path $build 'test/unmanaged.txt'), 'manual file')
+    # Cache equal to or below the existing instance is rejected before any
+    # switch, volume, lock, download, disk, or VM work. Existing cache-named
+    # user files remain byte-for-byte unchanged.
+    New-Case
+    $instance = Join-Path $build 'test'
+    New-Item -ItemType Directory -Path $instance | Out-Null
+    $cacheArchive = Join-Path $instance 'Fedora-Cloud-Base-Azure-44-1.7.x86_64.vhdfixed.xz'
+    $cacheFixed = Join-Path $instance 'Fedora-Cloud-Base-Azure-44-1.7.x86_64.vhd'
+    [IO.File]::WriteAllText($cacheArchive, 'instance archive')
+    [IO.File]::WriteAllText($cacheFixed, 'instance fixed')
+    $script:options.Cache = $instance
+    Expect-Failure 'Cache directory must not equal or be inside'
+    Assert ($state.Calls.Count -eq 0 -and -not $state.VM) 'Cache equal to instance caused lifecycle calls'
+    Assert-TextUnchanged $cacheArchive 'instance archive'
+    Assert-TextUnchanged $cacheFixed 'instance fixed'
+
+    New-Case
+    $instance = Join-Path $build 'test'
+    New-Item -ItemType Directory -Path $instance | Out-Null
+    $nestedCache = Join-Path $instance 'cache'
+    New-Item -ItemType Directory -Path $nestedCache | Out-Null
+    $cacheArchive = Join-Path $instance 'Fedora-Cloud-Base-Azure-44-1.7.x86_64.vhdfixed.xz'
+    $cacheFixed = Join-Path $instance 'Fedora-Cloud-Base-Azure-44-1.7.x86_64.vhd'
+    [IO.File]::WriteAllText($cacheArchive, 'nested archive')
+    [IO.File]::WriteAllText($cacheFixed, 'nested fixed')
+    $script:options.Cache = $nestedCache
+    Expect-Failure 'Cache directory must not equal or be inside'
+    Assert ($state.Calls.Count -eq 0 -and -not $state.VM) 'Nested cache caused lifecycle calls'
+    Assert-TextUnchanged $cacheArchive 'nested archive'
+    Assert-TextUnchanged $cacheFixed 'nested fixed'
+
+    # A sibling whose name only shares the instance prefix remains valid.
+    New-Case
+    $siblingCache = Join-Path $build 'test-cache'
+    New-Item -ItemType Directory -Path $siblingCache | Out-Null
+    Copy-Item -Path (Join-Path $cache '*') -Destination $siblingCache
+    $script:options.Cache = $siblingCache
+    & $scriptPath @script:options
+    $metadata = Get-Content -LiteralPath (Join-Path $build 'test/ownership.json') -Raw | ConvertFrom-Json
+    Assert ($state.VM -and $metadata.InstanceDirectory -eq [IO.Path]::GetFullPath((Join-Path $build 'test'))) 'Sibling cache was rejected or changed layout metadata'
+    Assert ($metadata.ChildPath -eq [IO.Path]::GetFullPath((Join-Path $build 'test/disk.vhdx'))) 'Child metadata path changed'
+    Assert ($metadata.SeedIso -eq [IO.Path]::GetFullPath($seed)) 'Seed metadata path changed'
+
+    # An existing ordinary directory and regular user file are preserved; Force
+    # does not grant permission to overwrite either one.
+    New-Case
+    New-Item -ItemType Directory -Path (Join-Path $build 'test') | Out-Null
+    $userFile = Join-Path $build 'test/unmanaged.txt'
+    [IO.File]::WriteAllText($userFile, 'manual file')
     $script:options.Force = $true
-    Expect-Failure 'Instance files exist'
-    Assert (Test-Path (Join-Path $build 'test/unmanaged.txt')) 'Force deleted unmanaged instance files'
+    & $scriptPath @script:options
+    Assert ($state.VM -and (Test-Path $userFile)) 'Existing user file was not preserved'
+    Assert ((Get-Content -LiteralPath $userFile -Raw) -eq 'manual file') 'Existing user file was overwritten'
+
+    # An empty existing directory is accepted without Force and remains a user
+    # directory after managed files are removed.
+    New-Case
+    New-Item -ItemType Directory -Path (Join-Path $build 'test') | Out-Null
+    & $scriptPath @script:options
+    Assert ($state.VM -and (Test-Path (Join-Path $build 'test'))) 'Existing empty directory was not reused'
+
+    # A supplied ISO directly inside the instance is an allowed preexisting file.
+    New-Case
+    $instance = Join-Path $build 'test'
+    New-Item -ItemType Directory -Path $instance | Out-Null
+    $insideSeed = Join-Path $instance 'pipacs--nocloud-init.iso'
+    Copy-Item -LiteralPath $seed -Destination $insideSeed
+    $script:options.SeedIso = $insideSeed
+    & $scriptPath @script:options
+    Assert (Test-Path $insideSeed) 'Inside-instance seed was not preserved'
+    $metadata = Get-Content -LiteralPath (Join-Path $instance 'ownership.json') -Raw | ConvertFrom-Json
+    Assert (@($metadata.PreexistingFiles) -contains 'pipacs--nocloud-init.iso') 'Inside seed provenance was not recorded'
+
+    # Managed-name collisions and an instance file fail before disk creation.
+    New-Case
+    $instance = Join-Path $build 'test'
+    New-Item -ItemType Directory -Path $instance | Out-Null
+    $collision = Join-Path $instance 'DiSk.VHdX'
+    [IO.File]::WriteAllText($collision, 'protected')
+    Expect-Failure 'reserved managed file'
+    Assert (-not $state.Calls.Contains('convert') -and -not $state.Calls.Contains('new-vm')) 'Managed collision reached creation'
+    Assert ((Get-Content -LiteralPath $collision -Raw) -eq 'protected') 'Managed collision was changed'
+
+    New-Case
+    [IO.File]::WriteAllText((Join-Path $build 'test'), 'not a directory')
+    Expect-Failure 'not a directory'
+    Assert (-not $state.Calls.Contains('new-vm')) 'Instance file reached creation'
+
+    # Creation failure removes only its created child and keeps the existing
+    # directory, seed, and user file.
+    New-Case
+    $instance = Join-Path $build 'test'
+    New-Item -ItemType Directory -Path $instance | Out-Null
+    $insideSeed = Join-Path $instance 'seed.iso'
+    Copy-Item -LiteralPath $seed -Destination $insideSeed
+    $userFile = Join-Path $instance 'notes.txt'
+    [IO.File]::WriteAllText($userFile, 'keep me')
+    $script:options.SeedIso = $insideSeed
+    $state.Fail = 'cpu'
+    Expect-Failure 'cpu'
+    Assert ((Test-Path $instance) -and (Test-Path $insideSeed) -and (Test-Path $userFile)) 'Rollback removed existing entries'
+    Assert (-not (Test-Path (Join-Path $instance 'disk.vhdx'))) 'Rollback retained created child'
+
+    New-Case
+    $instance = Join-Path $build 'test'
+    New-Item -ItemType Directory -Path $instance | Out-Null
+    $insideSeed = Join-Path $instance 'seed.iso'
+    Copy-Item -LiteralPath $seed -Destination $insideSeed
+    $userFile = Join-Path $instance 'notes.txt'
+    [IO.File]::WriteAllText($userFile, 'keep me')
+    $script:options.SeedIso = $insideSeed
+    $state.Fail = 'start'
+    $state.StopFails = $true
+    Expect-Failure 'start'
+    Assert ((Test-Path $instance) -and (Test-Path $insideSeed) -and (Test-Path $userFile) -and
+        (Test-Path (Join-Path $instance 'disk.vhdx'))) 'Ambiguous start rollback removed files'
+
+    # Deletion removes the exact VM and managed files but preserves passthrough
+    # files and the preexisting instance directory.
+    New-Case
+    $instance = Join-Path $build 'test'
+    New-Item -ItemType Directory -Path $instance | Out-Null
+    $insideSeed = Join-Path $instance 'seed.iso'
+    Copy-Item -LiteralPath $seed -Destination $insideSeed
+    $userFile = Join-Path $instance 'notes.txt'
+    [IO.File]::WriteAllText($userFile, 'keep me')
+    $script:options.SeedIso = $insideSeed
+    & $scriptPath @script:options
+    $state.VM.State = 'Off'
+    $script:options.Action = 'delete'
+    & $scriptPath @script:options
+    Assert ((-not $state.VM) -and (Test-Path $instance) -and (Test-Path $insideSeed) -and (Test-Path $userFile)) 'Delete removed preexisting entries'
+    Assert (-not (Test-Path (Join-Path $instance 'ownership.json'))) 'Delete retained managed metadata'
 
     if ([Environment]::OSVersion.Platform -ne 'Win32NT') {
         # A lock symlink must be rejected before opening or changing its target.
@@ -279,6 +502,11 @@ try {
     Assert ($state.ResizeBytes -eq 17179869184L) 'Wrong target disk size'
     Assert ($state.ChildParent -eq (Join-Path $build 'fedora44-azure-base-17179869184.vhdx')) 'Wrong differencing parent'
     Assert ($state.Calls.Contains('cpu:2:True')) 'Nested CPU setting missing'
+    Assert ($state.CheckpointType -eq 'ProductionOnly') 'Production checkpoints are not the default'
+    Assert ($state.GuestServiceEnabled -and
+        $state.Calls.Contains('guestservice-query') -and
+        $state.Calls.Contains('guestservice-enable') -and
+        $state.OtherIntegrationEnabled) 'Guest Service Interface was not enabled by default or another service changed'
     Assert ($state.Calls.Contains('dynamic:False')) 'Static RAM is not the default'
     Assert ($state.Calls.IndexOf('convert') -lt $state.Calls.IndexOf('resize')) 'Wrong conversion ordering'
     Assert ($state.Calls.IndexOf('resize') -lt $state.Calls.IndexOf('child')) 'Base resize happened after child creation'
@@ -426,7 +654,8 @@ try {
     }
     & $scriptPath @script:options
 
-    foreach ($step in 'convert', 'resize', 'child', 'cpu', 'firmware', 'memory', 'dvd', 'start') {
+    foreach ($step in 'convert', 'resize', 'child', 'checkpoint', 'guestservice-query',
+        'guestservice', 'cpu', 'firmware', 'memory', 'dvd', 'start') {
         New-Case
         $state.Fail = $step
         Expect-Failure $step
@@ -600,5 +829,8 @@ try {
 } finally {
   Remove-Module Hyper-V -ErrorAction SilentlyContinue
   $env:PSModulePath = $oldModulePath
+  $env:PATH = $oldPath
+  $env:ProgramFiles = $oldProgramFiles
+  ${env:ProgramFiles(x86)} = $oldProgramFilesX86
   Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue
 }

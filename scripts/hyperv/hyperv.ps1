@@ -34,6 +34,33 @@ function ConvertTo-FullyQualifiedPath($Path, $Label) {
     [IO.Path]::GetFullPath($Path)
 }
 
+function Get-CanonicalComparisonPath($Path) {
+    $full = [IO.Path]::GetFullPath($Path)
+    if ($script:IsWindowsPlatform) {
+        $full = $full.Replace('/', '\')
+    }
+    while ($full.Length -gt 1 -and ($full.EndsWith('\') -or $full.EndsWith('/'))) {
+        if ($script:IsWindowsPlatform -and $full -match '^[A-Za-z]:[\\/]$') {
+            break
+        }
+        $full = $full.Substring(0, $full.Length - 1)
+    }
+    $full
+}
+
+function Test-PathEqualOrDescendant($Candidate, $Root) {
+    $candidatePath = Get-CanonicalComparisonPath $Candidate
+    $rootPath = Get-CanonicalComparisonPath $Root
+    if ($candidatePath.Equals($rootPath, [StringComparison]::OrdinalIgnoreCase)) {
+        return $true
+    }
+    if ($rootPath.EndsWith('\') -or $rootPath.EndsWith('/')) {
+        return $candidatePath.StartsWith($rootPath, [StringComparison]::OrdinalIgnoreCase)
+    }
+    return $candidatePath.StartsWith($rootPath + [IO.Path]::DirectorySeparatorChar,
+        [StringComparison]::OrdinalIgnoreCase)
+}
+
 function Get-CanonicalGuid($Value, $Label) {
     try {
         return ([Guid]$Value).ToString('D')
@@ -72,6 +99,41 @@ function Test-NoReparsePath($Path) {
     }
 }
 
+function Test-TrustedExecutableFile($Path) {
+    if (-not $Path) {
+        return $false
+    }
+    try {
+        if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+            return $false
+        }
+        Assert-NoReparseAncestors $Path
+        return $true
+    } catch {
+        return $false
+    }
+}
+
+function Resolve-7ZipExecutable {
+    $command = Get-Command 7z.exe -CommandType Application -ErrorAction SilentlyContinue |
+        Select-Object -First 1
+    if ($command -and (Test-TrustedExecutableFile $command.Path)) {
+        return [IO.Path]::GetFullPath($command.Path)
+    }
+
+    foreach ($programFiles in @($env:ProgramFiles, ${env:ProgramFiles(x86)})) {
+        if (-not $programFiles) {
+            continue
+        }
+        $candidate = Join-Path $programFiles '7-Zip\7z.exe'
+        if (Test-TrustedExecutableFile $candidate) {
+            return [IO.Path]::GetFullPath($candidate)
+        }
+    }
+
+    throw 'Install 7-Zip, or add 7z.exe to PATH; no usable 7z.exe was found'
+}
+
 function Get-PiVmSettings {
     if ($Id -notmatch '^[A-Za-z0-9][A-Za-z0-9_.-]{0,100}$') {
         throw 'Invalid instance id'
@@ -79,12 +141,16 @@ function Get-PiVmSettings {
 
     $buildDirectory = ConvertTo-FullyQualifiedPath $Build 'Build'
     $cacheDirectory = ConvertTo-FullyQualifiedPath $Cache 'Cache'
+    $instanceDirectory = ConvertTo-FullyQualifiedPath (Join-Path $buildDirectory $Id) 'Instance'
+    if (Test-PathEqualOrDescendant $cacheDirectory $instanceDirectory) {
+        throw 'Cache directory must not equal or be inside the instance directory'
+    }
     Assert-NoReparseAncestors $buildDirectory
     Assert-NoReparseAncestors $cacheDirectory
     [pscustomobject]@{
         Id = $Id
         VmName = "pi-vm-$Id"
-        InstanceDirectory = ConvertTo-FullyQualifiedPath (Join-Path $buildDirectory $Id) 'Instance'
+        InstanceDirectory = $instanceDirectory
         BuildDirectory = $buildDirectory
         CacheDirectory = $cacheDirectory
         SwitchName = $Switch
@@ -208,11 +274,15 @@ function Test-FixedVhd($Path) {
     }
 }
 
-function Get-VerifiedAzureImage($Settings) {
+function Get-VerifiedAzureImage($Settings, $SevenZipPath) {
     $archive = Join-Path $Settings.CacheDirectory 'Fedora-Cloud-Base-Azure-44-1.7.x86_64.vhdfixed.xz'
     $fixed = Join-Path $Settings.CacheDirectory 'Fedora-Cloud-Base-Azure-44-1.7.x86_64.vhd'
     $url = 'https://download.fedoraproject.org/pub/fedora/linux/releases/44/Cloud/x86_64/images/Fedora-Cloud-Base-Azure-44-1.7.x86_64.vhdfixed.xz'
     $archiveHash = 'daa212a316a94d7a4584a704cad89dfd0bac45e70ee83c4212c095b3b8d55ce5'
+    $fixedValid = Test-FixedVhd $fixed
+    if (-not $fixedValid -and -not $SevenZipPath) {
+        $SevenZipPath = Resolve-7ZipExecutable
+    }
 
     $lockPath = Join-Path $Settings.CacheDirectory '.download.lock'
     Assert-NoReparseAncestors $lockPath
@@ -236,16 +306,14 @@ function Get-VerifiedAzureImage($Settings) {
             }
         }
 
-        if (-not (Test-FixedVhd $fixed)) {
+        if (-not $fixedValid) {
             $stage = Join-Path $Settings.CacheDirectory ('.azure-stage-' + [Guid]::NewGuid().ToString('N'))
             Assert-NoReparseAncestors $stage
             New-Item -ItemType Directory -Path $stage | Out-Null
             try {
-                if (-not (Get-Command 7z -ErrorAction SilentlyContinue)) {
-                    throw 'Install 7-Zip and put 7z.exe in PATH'
-                }
-                & 7z x $archive "-o$stage" -y | Out-Null
-                if ($LASTEXITCODE) {
+                & $SevenZipPath x $archive "-o$stage" -y | Out-Null
+                $extractExitCode = $LASTEXITCODE
+                if ($extractExitCode -ne 0) {
                     throw '7-Zip decompression failed'
                 }
                 $extracted = Join-Path $stage 'Fedora-Cloud-Base-Azure-44-1.7.x86_64.vhdfixed'
@@ -306,16 +374,18 @@ function Get-OrCreateBaseDisk($Settings, $Creation, $FixedPath) {
     $base
 }
 
-function Write-OwnershipMetadata($Settings, $Vm, $ChildPath, $ParentPath) {
+function Write-OwnershipMetadata($Settings, $Vm, $ChildPath, $ParentPath, $PreexistingFiles, $InstanceDirectoryCreated) {
     $metadata = [ordered]@{
         Version = 2
         VmId = Get-CanonicalGuid $Vm.Id 'New VM ID'
         Id = $Settings.Id
         VmName = $Settings.VmName
         InstanceDirectory = [IO.Path]::GetFullPath($Settings.InstanceDirectory)
+        InstanceDirectoryCreated = [bool]$InstanceDirectoryCreated
         ChildPath = [IO.Path]::GetFullPath($ChildPath)
         ParentPath = [IO.Path]::GetFullPath($ParentPath)
         SeedIso = [IO.Path]::GetFullPath($Settings.SeedIso)
+        PreexistingFiles = @($PreexistingFiles)
     }
     Assert-NoReparseAncestors $ChildPath
     Assert-NoReparseAncestors $ParentPath
@@ -329,6 +399,48 @@ function Write-OwnershipMetadata($Settings, $Vm, $ChildPath, $ParentPath) {
     } finally {
         Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue
     }
+}
+
+function Test-ManagedInstanceName($Name) {
+    $Name -ieq 'disk.vhdx' -or $Name -ieq 'ownership.json' -or $Name -ieq 'creation-complete'
+}
+
+function Get-PreexistingInstanceFiles($Settings) {
+    Assert-NoReparseAncestors $Settings.InstanceDirectory
+    if (-not (Test-Path -LiteralPath $Settings.InstanceDirectory -PathType Container)) {
+        return @()
+    }
+
+    $files = @()
+    foreach ($entry in @(Get-ChildItem -LiteralPath $Settings.InstanceDirectory -Force)) {
+        if ($entry.PSIsContainer -or -not (Test-NoReparsePath $entry.FullName)) {
+            throw 'Instance directory contains a directory, non-regular file, or reparse point'
+        }
+        if (Test-ManagedInstanceName $entry.Name) {
+            throw "Instance directory contains reserved managed file: $($entry.Name)"
+        }
+        $files += $entry.Name
+    }
+    return $files
+}
+
+function Get-ValidatedPreexistingFiles($Metadata) {
+    if ($null -eq $Metadata.PreexistingFiles) {
+        return @()
+    }
+    $files = @($Metadata.PreexistingFiles)
+    if ($files.Count -eq 0 -or ($files.Count -eq 1 -and $null -eq $files[0])) {
+        return @()
+    }
+    $seen = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+    foreach ($name in $files) {
+        if (($name -isnot [string]) -or [string]::IsNullOrEmpty($name) -or
+            ($name -match '[\\/]') -or ($name -eq '.') -or ($name -eq '..') -or
+            (Test-ManagedInstanceName $name) -or (-not $seen.Add($name))) {
+            throw 'VM ownership preexisting-file list is invalid'
+        }
+    }
+    return $files
 }
 
 function Get-OwnedVmDiskPath($Vm) {
@@ -373,6 +485,14 @@ function Assert-ManagedOwnership($Settings, $Vm) {
         (ConvertTo-FullyQualifiedPath $metadata.InstanceDirectory 'Recorded instance') -ine $directory) {
         throw 'VM ownership identity does not match this exact registration'
     }
+    $preexistingFiles = Get-ValidatedPreexistingFiles $metadata
+    $instanceDirectoryCreated = $true
+    if ($null -ne $metadata.InstanceDirectoryCreated) {
+        if ($metadata.InstanceDirectoryCreated -isnot [bool]) {
+            throw 'VM ownership directory provenance is invalid'
+        }
+        $instanceDirectoryCreated = [bool]$metadata.InstanceDirectoryCreated
+    }
 
     $child = ConvertTo-FullyQualifiedPath $metadata.ChildPath 'Recorded child disk'
     $expectedChild = ConvertTo-FullyQualifiedPath (Join-Path $directory 'disk.vhdx') 'Child disk'
@@ -406,6 +526,8 @@ function Assert-ManagedOwnership($Settings, $Vm) {
         Vm = $Vm
         Child = $expectedChild
         Parent = $parent
+        PreexistingFiles = $preexistingFiles
+        InstanceDirectoryCreated = $instanceDirectoryCreated
     }
 }
 
@@ -416,12 +538,21 @@ function Assert-ManagedInstanceLayout($Settings, $Ownership) {
         'ownership.json' = Join-Path $Settings.InstanceDirectory 'ownership.json'
         'creation-complete' = Join-Path $Settings.InstanceDirectory 'creation-complete'
     }
+    $allowed = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+    foreach ($name in $expected.Keys) {
+        $null = $allowed.Add($name)
+    }
+    foreach ($name in $Ownership.PreexistingFiles) {
+        if (-not $allowed.Add($name)) {
+            throw 'VM ownership preexisting-file list overlaps managed files'
+        }
+    }
     $entries = @(Get-ChildItem -LiteralPath $Settings.InstanceDirectory -Force)
-    if ($entries.Count -ne $expected.Count) {
+    if ($entries.Count -ne $allowed.Count) {
         throw 'Instance directory contains unmanaged files; no lifecycle action was taken'
     }
     foreach ($entry in $entries) {
-        if (-not $expected.ContainsKey($entry.Name) -or
+        if (-not $allowed.Contains($entry.Name) -or $entry.PSIsContainer -or
             -not (Test-NoReparsePath $entry.FullName)) {
             throw 'Instance directory contains unmanaged or unsafe files; no lifecycle action was taken'
         }
@@ -441,6 +572,16 @@ function Configure-Vm($Settings, $Creation, $DiskPath) {
     $Creation.Vm = $vm
     $Creation.RegisteredVm = $true
 
+    Set-VM -VM $vm -CheckpointType ProductionOnly
+    $guestService = @(Get-VMIntegrationService -VM $vm |
+        Where-Object { $_.Name -ceq 'Guest Service Interface' })
+    if ($guestService.Count -ne 1) {
+        throw 'Guest Service Interface integration service was not found'
+    }
+    if (-not $guestService[0].Enabled) {
+        Enable-VMIntegrationService -VMIntegrationService $guestService[0]
+    }
+
     Set-VMProcessor -VM $vm -Count $Settings.CpuCount `
         -ExposeVirtualizationExtensions $true
     Set-VMFirmware -VM $vm -EnableSecureBoot Off
@@ -456,15 +597,23 @@ function Configure-Vm($Settings, $Creation, $DiskPath) {
     $vm
 }
 
-function Remove-CreatedInstanceSafely($Settings) {
+function Remove-CreatedManagedFilesSafely($Settings, $Creation) {
     Assert-NoReparseAncestors $Settings.InstanceDirectory
-    $entries = @(Get-ChildItem -LiteralPath $Settings.InstanceDirectory -Force)
-    foreach ($entry in $entries) {
-        if ($entry.PSIsContainer -or -not (Test-NoReparsePath $entry.FullName)) {
-            throw 'Creation rollback found an unmanaged or reparse-point entry; manual cleanup required'
+    foreach ($path in $Creation.CreatedManagedFiles) {
+        Assert-NoReparseAncestors $path
+        if (Test-Path -LiteralPath $path) {
+            if (-not (Test-Path -LiteralPath $path -PathType Leaf) -or
+                -not (Test-NoReparsePath $path)) {
+                throw 'Creation rollback found an unmanaged or reparse-point entry; manual cleanup required'
+            }
+            Remove-Item -LiteralPath $path -Force
         }
     }
-    Remove-Item -LiteralPath $Settings.InstanceDirectory -Recurse -Force
+    if ($Creation.NewInstanceDirectory -and
+        (Test-Path -LiteralPath $Settings.InstanceDirectory -PathType Container) -and
+        @(Get-ChildItem -LiteralPath $Settings.InstanceDirectory -Force).Count -eq 0) {
+        Remove-Item -LiteralPath $Settings.InstanceDirectory -Force
+    }
 }
 
 function Undo-VmCreation($Settings, $Creation) {
@@ -482,7 +631,10 @@ function Undo-VmCreation($Settings, $Creation) {
     if ($Creation.PartialBase) {
         Remove-Item -LiteralPath $Creation.PartialBase -Force -ErrorAction SilentlyContinue
     }
-    if (-not $Creation.OwnedInstance) {
+    if (-not $Creation.OwnedInstance -or $Creation.RegistrationAttempted -and -not $Creation.RegisteredVm) {
+        if ($Creation.RegistrationAttempted -and -not $Creation.RegisteredVm) {
+            Write-Warning "VM registration is ambiguous; keeping instance files and inspect $($Settings.VmName)"
+        }
         return
     }
 
@@ -498,7 +650,7 @@ function Undo-VmCreation($Settings, $Creation) {
     }
     if ($safeToRemove) {
         try {
-            Remove-CreatedInstanceSafely $Settings
+            Remove-CreatedManagedFilesSafely $Settings $Creation
         } catch {
             Write-Warning "Instance retained at $($Settings.InstanceDirectory); inspect rollback entries before manual cleanup: $_"
         }
@@ -507,7 +659,18 @@ function Undo-VmCreation($Settings, $Creation) {
     }
 }
 
-function New-PiVm($Settings) {
+function New-PiVm($Settings, $SevenZipPath) {
+    Assert-NoReparseAncestors $Settings.InstanceDirectory
+    $instanceExists = Test-Path -LiteralPath $Settings.InstanceDirectory
+    if ($instanceExists -and -not (Test-Path -LiteralPath $Settings.InstanceDirectory -PathType Container)) {
+        throw 'Instance path exists but is not a directory'
+    }
+    $preexistingFiles = if ($instanceExists) {
+        Get-PreexistingInstanceFiles $Settings
+    } else {
+        @()
+    }
+
     New-Item -ItemType Directory -Force -Path $Settings.BuildDirectory, $Settings.CacheDirectory | Out-Null
     $lockPath = Join-Path $Settings.BuildDirectory '.hyperv.lock'
     Assert-NoReparseAncestors $lockPath
@@ -517,36 +680,42 @@ function New-PiVm($Settings) {
     Assert-NoReparseAncestors $Settings.CacheDirectory
     $creation = [pscustomobject]@{
         OwnedInstance = $false
+        NewInstanceDirectory = $false
         RegisteredVm = $false
+        RegistrationAttempted = $false
         Vm = $null
         PartialBase = $null
+        CreatedManagedFiles = [Collections.Generic.List[string]]::new()
+        PreexistingFiles = $preexistingFiles
     }
 
     try {
         if (Get-VM -Name $Settings.VmName -ErrorAction SilentlyContinue) {
             throw "VM exists: $($Settings.VmName)"
         }
-        if ((Test-Path -LiteralPath $Settings.InstanceDirectory) -and -not $Settings.Force) {
-            throw 'Instance files exist; -Force explicitly recreates them'
+        if (-not $instanceExists) {
+            Assert-NoReparseAncestors $Settings.InstanceDirectory
+            New-Item -ItemType Directory -Path $Settings.InstanceDirectory | Out-Null
+            $creation.NewInstanceDirectory = $true
         }
-        if (Test-Path -LiteralPath $Settings.InstanceDirectory) {
-            throw 'Instance files exist; use -Action delete after ownership checks before a fresh start'
-        }
-        Assert-NoReparseAncestors $Settings.InstanceDirectory
-        New-Item -ItemType Directory -Path $Settings.InstanceDirectory | Out-Null
         $creation.OwnedInstance = $true
 
-        $fixedPath = Get-VerifiedAzureImage $Settings
+        $fixedPath = Get-VerifiedAzureImage $Settings $SevenZipPath
         $basePath = Get-OrCreateBaseDisk $Settings $creation $fixedPath
         $childPath = Join-Path $Settings.InstanceDirectory 'disk.vhdx'
         Assert-NoReparseAncestors $childPath
         Assert-NoReparseAncestors $basePath
+        $creation.CreatedManagedFiles.Add($childPath)
         New-VHD -Path $childPath -ParentPath $basePath -Differencing | Out-Null
 
+        $creation.RegistrationAttempted = $true
         $vm = Configure-Vm $Settings $creation $childPath
-        Write-OwnershipMetadata $Settings $vm $childPath $basePath
+        $metadataPath = Join-Path $Settings.InstanceDirectory 'ownership.json'
+        $creation.CreatedManagedFiles.Add($metadataPath)
+        Write-OwnershipMetadata $Settings $vm $childPath $basePath $creation.PreexistingFiles $creation.NewInstanceDirectory
         $marker = Join-Path $Settings.InstanceDirectory 'creation-complete'
         Assert-NoReparseAncestors $marker
+        $creation.CreatedManagedFiles.Add($marker)
         Set-Content -LiteralPath $marker -Value 'complete' -NoNewline
         Start-VM -VM $vm | Out-Null
         Write-Host "Started $($Settings.VmName); console: vmconnect.exe localhost $($Settings.VmName)"
@@ -578,7 +747,12 @@ function Start-PiVm($Settings) {
     Assert-StartSettings $Settings
     Get-VMSwitch -Name $Settings.SwitchName -ErrorAction Stop | Out-Null
     Assert-StorageCapacity $Settings
-    New-PiVm $Settings
+    $sevenZipPath = $null
+    $fixedPath = Join-Path $Settings.CacheDirectory 'Fedora-Cloud-Base-Azure-44-1.7.x86_64.vhd'
+    if (-not (Test-FixedVhd $fixedPath)) {
+        $sevenZipPath = Resolve-7ZipExecutable
+    }
+    New-PiVm $Settings $sevenZipPath
 }
 
 function Stop-PiVm($Settings) {
@@ -609,7 +783,12 @@ function Remove-ManagedInstance($Settings, $Ownership) {
         Remove-Item -LiteralPath $path -Force
     }
     Assert-NoReparseAncestors $Settings.InstanceDirectory
-    Remove-Item -LiteralPath $Settings.InstanceDirectory -Force
+    if ($Ownership.InstanceDirectoryCreated -and
+        @(Get-ChildItem -LiteralPath $Settings.InstanceDirectory -Force).Count -eq 0) {
+        Remove-Item -LiteralPath $Settings.InstanceDirectory -Force
+    } else {
+        Write-Host "Preserved instance directory $($Settings.InstanceDirectory) and preexisting files"
+    }
 }
 
 function Remove-PiVm($Settings) {

@@ -12,16 +12,22 @@ Linux offline fixtures do not validate native Windows cmdlets or guest boot.
    `uv run --script scripts/build/seed.py pipacs --hostname pipacs --output build/pipacs-seed.iso`.
    Copy this nonempty ISO to Windows. From the repository checkout, run
    `.\scripts\hyperv\hyperv.ps1 -Action start -Id pipacs -SeedIso C:\VMSeeds\pipacs-seed.iso -Switch "Default Switch"`.
-   Windows does not run Python or `uv`; hostname and account settings come from
-   the copied ISO.
+   Confirm 7-Zip discovery uses an application `7z.exe` on PATH when present,
+   or falls back to `C:\Program Files\7-Zip\7z.exe` (then
+   `C:\Program Files (x86)\7-Zip\7z.exe`) without changing process, user, or
+   machine PATH. Windows does not run Python or `uv`; hostname and account
+   settings come from the copied ISO.
 3. Verify the downloaded archive and expanded `.vhd` against the pinned SHA-256
    values. The expanded fixed VHD must be 5368709632 bytes with a
    5368709120-byte virtual size. Confirm the converted parent is a dynamic VHDX,
    resized to the requested size, and the instance disk is a differencing child.
 4. Confirm Generation 2, Secure Boot off, CPUs with nested virtualization
-   exposed, and static memory by default. On a fresh instance, verify
-   `-DynamicMemory` with 1024 MiB minimum, 2048 MiB startup, and 8192 MiB
-   maximum. Test an external switch separately; do not change host networking.
+   exposed, static memory by default, Production checkpoints, and an enabled
+   `Guest Service Interface` integration service. Existing integration services
+   must remain unchanged; automatic checkpoint scheduling is not changed. On a
+   fresh instance, verify `-DynamicMemory` with 1024 MiB minimum, 2048 MiB
+   startup, and 8192 MiB maximum. Test an external switch separately; do not
+   change host networking.
 5. Find the guest IP with
    `Get-VMNetworkAdapter -VMName pi-vm-pipacs | Select-Object -ExpandProperty IPAddresses`.
    Log in, wait for cloud-init and bootstrap completion, and verify hostname,
@@ -31,14 +37,20 @@ Linux offline fixtures do not validate native Windows cmdlets or guest boot.
 7. Run `delete` on a stopped instance and confirm the exact VM registration and
    private child are removed while the cached parent remains. On a running owned
    VM, `delete` must refuse without `-Force`; with `-Force`, it must turn off the
-   exact owned VM before removing registration. Test failed stop/remove and
-   unexpected files: instance files must remain for manual inspection.
+   exact owned VM before removing registration. Start once with an existing
+   ordinary instance directory containing the supplied ISO and a regular user
+   file; verify both survive creation rollback and `delete`, and that a new
+   unknown file causes delete preflight to refuse before VM destruction. Managed
+   name collisions, directories, and reparse entries must refuse before
+   creation. Test failed stop/remove and unexpected files: instance files must
+   remain for manual inspection.
 8. Test a supplied ISO again and verify it is unchanged. Never remove a parent
    VHDX while differencing children depend on it.
 
 The Linux fixture does not prove Windows PowerShell 5.1 path rules, drive/UNC
 normalization, junction or reparse-ancestor detection, Hyper-V VM-ID parameter
-binding, native VHD conversion, switch attachment, guest boot, or cleanup after
-an interrupted host operation. These are the remaining Windows checks; this
+binding, native VHD conversion, switch attachment, integration-service name
+localization, checkpoint configuration, guest boot, or cleanup after an
+interrupted host operation. These are the remaining Windows checks; this
 repository makes no claim that they have been run until the checklist is
 completed on a disposable Windows host.

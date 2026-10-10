@@ -10,6 +10,33 @@ function Add-Call($Text) {
     $script:state.Calls.Add($Text)
 }
 
+function Set-PiVmMockExtractorPath {
+    param($Path)
+    $script:state.ExtractorPath = $Path
+}
+
+# Production asks for an Application command. Keep the fixture's 7z function
+# available for its adapter without making that function look like an exe.
+function Get-Command {
+    [CmdletBinding()]
+    param(
+        [Parameter(Position=0)] [string]$Name,
+        [System.Management.Automation.CommandTypes]$CommandType
+    )
+    if (($Name -eq '7z.exe' -or $Name -eq '7z') -and
+        $CommandType -eq [System.Management.Automation.CommandTypes]::Application) {
+        if ($script:state.SevenZipCommandPath) {
+            return [pscustomobject]@{
+                Name = $Name
+                Path = $script:state.SevenZipCommandPath
+                CommandType = [System.Management.Automation.CommandTypes]::Application
+            }
+        }
+        return
+    }
+    Microsoft.PowerShell.Core\Get-Command @PSBoundParameters
+}
+
 function Fail-At($Step) {
     if ($script:state.Fail -eq $Step) {
         throw "Injected failure: $Step"
@@ -231,6 +258,51 @@ function New-VM {
     $script:state.VM
 }
 
+function Set-VM {
+    [CmdletBinding()]
+    param($VM, $Name, $CheckpointType)
+
+    Assert-ExactVm $VM
+    Add-Call "checkpoint:$CheckpointType"
+    Fail-At 'checkpoint'
+    $script:state.CheckpointType = $CheckpointType
+}
+
+function Get-VMIntegrationService {
+    [CmdletBinding()]
+    param($VM, $VMName, [string[]]$Name)
+
+    Assert-ExactVm $VM
+    Add-Call 'guestservice-query'
+    Fail-At 'guestservice-query'
+    if ($Name -and $Name -notcontains 'Guest Service Interface') {
+        return
+    }
+    @(
+        [pscustomobject]@{
+            Name = 'Guest Service Interface'
+            Enabled = [bool]$script:state.GuestServiceEnabled
+        }
+        [pscustomobject]@{
+            Name = 'Shutdown'
+            Enabled = [bool]$script:state.OtherIntegrationEnabled
+        }
+    )
+}
+
+function Enable-VMIntegrationService {
+    [CmdletBinding()]
+    param($VMIntegrationService)
+
+    if (-not $VMIntegrationService -or
+        $VMIntegrationService.Name -cne 'Guest Service Interface') {
+        throw 'Wrong integration service'
+    }
+    Add-Call 'guestservice-enable'
+    Fail-At 'guestservice'
+    $script:state.GuestServiceEnabled = $true
+}
+
 function Set-VMProcessor {
     [CmdletBinding()]
     param($VM, $VMName, $Count, $ExposeVirtualizationExtensions)
@@ -316,7 +388,9 @@ function Remove-VM {
     $script:state.VM = $null
 }
 
-Export-ModuleMember -Function Set-PiVmMockState, Get-VM, Get-VMHardDiskDrive,
+Export-ModuleMember -Function Set-PiVmMockState, Set-PiVmMockExtractorPath, Get-Command,
+    Get-VM, Get-VMHardDiskDrive,
     Get-VMSwitch, Get-Volume, Get-FileHash, Invoke-WebRequest, 7z, Get-VHD,
-    Convert-VHD, Resize-VHD, New-VHD, New-VM, Set-VMProcessor, Set-VMFirmware,
-    Set-VMMemory, Add-VMDvdDrive, Start-VM, Stop-VM, Remove-VM
+    Convert-VHD, Resize-VHD, New-VHD, New-VM, Set-VM, Get-VMIntegrationService,
+    Enable-VMIntegrationService, Set-VMProcessor, Set-VMFirmware, Set-VMMemory,
+    Add-VMDvdDrive, Start-VM, Stop-VM, Remove-VM

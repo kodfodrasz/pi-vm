@@ -35,10 +35,35 @@ fail_bootstrap() {
 
 validate_hostname() {
     local hostname=$1
-    if [[ ! $hostname =~ ^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?$ ]]; then
-        printf 'invalid VM_HOSTNAME: %s\n' "$hostname" >&2
+    if [[ -z $hostname ]]; then
+        echo 'invalid VM_HOSTNAME: must be 1-64 ASCII characters' >&2
         return 1
     fi
+    if (( ${#hostname} > 64 )); then
+        echo 'invalid VM_HOSTNAME: Linux static hostnames are limited to 64 characters' >&2
+        return 1
+    fi
+    if [[ $hostname == .* || $hostname == *. || $hostname == *..* ]]; then
+        echo 'invalid VM_HOSTNAME: labels must not be empty (no leading, trailing, or repeated dots)' >&2
+        return 1
+    fi
+    if [[ $hostname == *[^A-Za-z0-9.-]* ]]; then
+        echo 'invalid VM_HOSTNAME: labels may contain only ASCII letters, digits, dots, and interior hyphens' >&2
+        return 1
+    fi
+    local label
+    local -a labels
+    IFS=. read -r -a labels <<< "$hostname"
+    for label in "${labels[@]}"; do
+        if (( ${#label} > 63 )); then
+            echo 'invalid VM_HOSTNAME: each DNS label must be at most 63 characters' >&2
+            return 1
+        fi
+        if [[ ! $label =~ ^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?$ ]]; then
+            echo 'invalid VM_HOSTNAME: each DNS label must be 1-63 ASCII letters or digits, with hyphens only between them' >&2
+            return 1
+        fi
+    done
 }
 
 validate_inputs() {

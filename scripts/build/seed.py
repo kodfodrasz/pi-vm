@@ -55,6 +55,25 @@ def valid_name(value: str, pattern: str, label: str) -> str:
     return value
 
 
+def valid_hostname(value: str) -> str:
+    if not value:
+        raise ValueError("invalid hostname: must be 1-64 ASCII characters")
+    if len(value) > 64:
+        raise ValueError("invalid hostname: Linux static hostnames are limited to 64 characters")
+    labels = value.split(".")
+    if any(not label for label in labels):
+        raise ValueError("invalid hostname: labels must not be empty (no leading, trailing, or repeated dots)")
+    for label in labels:
+        if len(label) > 63:
+            raise ValueError("invalid hostname: each DNS label must be at most 63 characters")
+        if not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?", label):
+            raise ValueError(
+                "invalid hostname: each DNS label must be 1-63 ASCII letters or digits, "
+                "with hyphens only between them"
+            )
+    return value
+
+
 def normalized_asset(path: Path, binary: bool) -> bytes:
     if binary:
         return path.read_bytes()
@@ -80,7 +99,7 @@ def collect_assets() -> list[tuple[str, Path, str, bytes]]:
 
 def render_seed(instance_id: str, hostname: str, output_dir: Path, username: str = "pi") -> None:
     valid_name(instance_id, r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", "instance id")
-    valid_name(hostname, r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?", "hostname")
+    valid_hostname(hostname)
     valid_name(username, r"[a-z_][a-z0-9_-]{0,31}", "username")
     if username == "root":
         raise ValueError("username must not be root")

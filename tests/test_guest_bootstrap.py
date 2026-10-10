@@ -362,7 +362,7 @@ class GuestMakeTests(unittest.TestCase):
                 "PI_VM_STAGE": str(stage),
                 "PI_VM_STATE": str(root / "state"),
                 "PI_VM_RETRY_WRAPPER": str(root / "retry-wrapper"),
-                "VM_HOSTNAME": "seeded-name",
+                "VM_HOSTNAME": "seeded-name.example.test",
                 "PI_USER": "developer",
                 "PI_DNF_ATTEMPT": str(attempt),
                 "PI_CALLS": str(calls),
@@ -371,15 +371,15 @@ class GuestMakeTests(unittest.TestCase):
             }
             first = subprocess.run([str(WRAPPER)], env=environment, text=True, capture_output=True)
             self.assertNotEqual(first.returncode, 0)
-            self.assertEqual((root / "state" / "hostname").read_text(), "seeded-name\n")
+            self.assertEqual((root / "state" / "hostname").read_text(), "seeded-name.example.test\n")
             self.assertTrue((root / "retry-wrapper").is_file())
             self.assertEqual((root / "state" / "username").read_text(), "developer\n")
             environment.pop("VM_HOSTNAME")
             environment.pop("PI_USER")
             second = subprocess.run([str(root / "retry-wrapper")], env=environment, text=True, capture_output=True)
             self.assertEqual(second.returncode, 0, second.stderr)
-            self.assertEqual(calls.read_text().splitlines(), ["seeded-name:developer"])
-            self.assertIn("hostname=seeded-name", (root / "state" / "bootstrap-complete").read_text())
+            self.assertEqual(calls.read_text().splitlines(), ["seeded-name.example.test:developer"])
+            self.assertIn("hostname=seeded-name.example.test", (root / "state" / "bootstrap-complete").read_text())
 
     def test_wrapper_retries_failed_make_without_touching_host_paths(self):
         with tempfile.TemporaryDirectory() as directory:

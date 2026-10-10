@@ -266,6 +266,14 @@ is Linux-only; Windows never invokes Python, `uv`, COM, or a Windows ISO builder
 CRLF source files are normalized before embedding. The output must not already
 exist, so an old seed is never silently replaced.
 
+Hostnames may be a single Linux label or a dotted FQDN. Every label is 1-63
+ASCII letters or digits with interior hyphens only, and the complete name is
+limited to 64 characters. The 64-character limit follows Linux `HOST_NAME_MAX`
+and `hostnamectl` static-hostname compatibility; DNS names can have a larger
+wire-format limit, but those names are not accepted here. Empty labels,
+trailing dots, whitespace, shell metacharacters, and leading or trailing
+hyphens are rejected before rendering or guest bootstrap.
+
 Private payloads may be placed in ignored `local/`. Binary files are preserved.
 `local/bootstrap.sh` is normalized to LF, staged mode `0700`, and run directly from `/opt/pi-vm/local` as
 root with `PI_VM_LOCAL_DIR`. All local directories are restricted to `0700`. A legacy `local/bootstrap.py`, if present, is
@@ -276,10 +284,14 @@ put credentials into a self-contained ISO.
 ## Windows / Hyper-V
 
 Use an elevated PowerShell on a Windows host with Hyper-V enabled, the
-`Hyper-V` PowerShell module and Storage cmdlets available, and `7z.exe` (7-Zip)
-in PATH. Windows PowerShell 5.1 or PowerShell 7 with the Hyper-V
-module can run the launcher. Windows requires no Python, `uv`, Python packages, or C# build shim: create the ISO on Linux and copy the existing nonempty absolute
-ISO to Windows. First guest boot also requires internet access.
+`Hyper-V` PowerShell module and Storage cmdlets available, and 7-Zip installed.
+Windows PowerShell 5.1 or PowerShell 7 with the Hyper-V module can run the
+launcher. It finds an application `7z.exe` on PATH first, then checks the
+standard `Program Files\7-Zip\7z.exe` and `Program Files (x86)\7-Zip\7z.exe`
+installer locations. It does not modify the process, user, or machine PATH.
+Windows requires no Python, `uv`, Python packages, or C# build shim: create the
+ISO on Linux and copy the existing nonempty absolute ISO to Windows. First
+guest boot also requires internet access.
 
 List existing switches with `Get-VMSwitch`. The launcher does not create or
 modify switches. An **External** switch puts the guest on the physical LAN;
@@ -361,17 +373,24 @@ only owned instance files once VM absence is certain. If registration or
 rollback is uncertain, files remain for manual inspection. Never delete a
 parent VHDX while differencing children depend on it.
 
-`start` restarts a stopped, completed registered VM without reconfiguring it.
-`-Force` never grants ownership of an existing directory and cannot recreate
-ambiguous or unmanaged instance files; use the ownership-checked `delete`, then
-start a fresh instance. `delete` requires the recorded creation identity, exact
-VM registration, and the expected private differencing child/parent relationship.
-A running owned VM needs `-Force`, which turns off that exact VM before removing
-its registration. Registration is removed before instance cleanup; failed stop,
-failed removal, an unexpected file, or uncertain ownership preserves files for
-manual inspection. The cached parent is never deleted. Native Windows
-integration and guest boot checks are separate from the offline fixtures; see
-[the Windows checklist](docs/hyperv-manual-test.md).
+`start` restarts a stopped, completed registered VM without reconfiguring it. If
+no VM is registered, it also accepts an existing ordinary instance directory
+with the supplied seed and other regular user files. It rejects the managed
+names `disk.vhdx`, `ownership.json`, and `creation-complete` (case-insensitive),
+directories, and reparse points before creation. It never overwrites existing
+files; `-Force` is not permission to do so. The cache directory must not equal
+or be inside the per-instance directory; sibling and parent cache directories
+remain valid.
+
+`delete` requires the recorded creation identity, exact VM registration, the
+expected private differencing child/parent relationship, and the recorded
+preexisting-file allowlist. A running owned VM needs `-Force`, which turns off
+that exact VM before removing its registration. Registration is removed before
+managed-file cleanup; the cached parent, supplied seed, and preexisting user
+files are preserved. A preexisting instance directory is retained even when
+empty. Failed stop, failed removal, an unexpected file, or uncertain ownership
+preserves files for manual inspection. Native Windows integration and guest boot
+checks are separate from the offline fixtures; see [the Windows checklist](docs/hyperv-manual-test.md).
 
 ## Offline checks
 
