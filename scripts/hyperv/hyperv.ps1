@@ -5,7 +5,7 @@ param(
     [string]$Action,
     [Parameter(Mandatory=$true)]
     [string]$Id,
-    [string]$Cache = (Join-Path $HOME '.cache/pi-vm/images'),
+    [string]$Cache = $(if ($env:PI_VM_CACHE) { $env:PI_VM_CACHE } else { Join-Path $HOME '.cache/pi-vm/images' }),
     [string]$Build = (Join-Path $PSScriptRoot (Join-Path '..' (Join-Path '..' 'build'))),
     [string]$Switch = 'Default Switch',
     [string]$SeedIso,
@@ -291,7 +291,7 @@ function Get-VerifiedAzureImage($Settings, $SevenZipPath) {
     try {
         Assert-NoReparseAncestors $archive
         Assert-NoReparseAncestors $fixed
-        if (-not (Test-FileHash $archive $archiveHash)) {
+        if (-not $fixedValid -and -not (Test-FileHash $archive $archiveHash)) {
             $download = Join-Path $Settings.CacheDirectory ('.download-' + [Guid]::NewGuid().ToString('N'))
             Assert-NoReparseAncestors $download
             try {

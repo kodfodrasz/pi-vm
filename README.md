@@ -169,7 +169,18 @@ The KVM tool downloads the pinned Fedora Cloud Base Generic qcow2 into
 `~/.cache/pi-vm/images`, checks its size, SHA-256, and `qemu-img check`, then
 uses it as an immutable backing file. Cache and VM artifacts are created with
 private modes; instance data is under `build/` (or `PI_VM_BUILD`) and cache
-data can be changed with `PI_VM_CACHE`. Seed files are rendered by
+data can be changed with `PI_VM_CACHE`. Set it for both `make download` and
+`make kvm-start` to use the same cache, for example:
+
+```sh
+PI_VM_CACHE="$HOME/data/pi-vm-images" make download
+PI_VM_CACHE="$HOME/data/pi-vm-images" make kvm-start
+```
+
+The Python tool also accepts `--cache PATH`; the standalone Hyper-V script
+accepts `-Cache PATH`. An explicit option overrides `PI_VM_CACHE`, which
+overrides the default `~/.cache/pi-vm/images`. These settings affect only the
+command's cache and do not require a global environment change. Seed files are rendered by
 `scripts/build/seed.py` and published atomically without replacement. `--force` only
 rebuilds a stopped instance; forced stop verifies the exact QEMU executable,
 exact `-drive file=` argument, and a pidfd before signalling.

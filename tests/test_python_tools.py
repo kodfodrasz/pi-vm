@@ -12,6 +12,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -30,6 +31,76 @@ def load(name: str, path: Path):
 
 seed = load("seed", ROOT / "scripts/build/seed.py")
 kvm = load("kvm", ROOT / "scripts/kvm/kvm.py")
+class CachePrecedenceTests(unittest.TestCase):
+    def run_kvm_download(self, home: Path, cache_env: str | None = None, explicit: Path | None = None) -> Path:
+        environment = {**os.environ, "HOME": str(home)}
+        environment.pop("PI_VM_CACHE", None)
+        if cache_env is not None:
+            environment["PI_VM_CACHE"] = cache_env
+        code = (
+            "import importlib.util, pathlib, sys; "
+            f"spec=importlib.util.spec_from_file_location('kvm', {str(ROOT / 'scripts/kvm/kvm.py')!r}); "
+            "module=importlib.util.module_from_spec(spec); spec.loader.exec_module(module); "
+            "module.download_image=lambda cache: cache; "
+            "module.main(['download'" + (", '--cache', " + repr(str(explicit)) if explicit else "") + "])"
+        )
+        result = subprocess.run([sys.executable, "-c", code], env=environment,
+                                text=True, capture_output=True, check=True)
+        return Path(result.stdout.strip())
+
+    def test_kvm_cache_default_environment_and_explicit_precedence(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory) / "home"
+            selected = Path(directory) / "environment-cache"
+            explicit = Path(directory) / "explicit-cache"
+            self.assertEqual(self.run_kvm_download(home), home / ".cache/pi-vm/images")
+            self.assertEqual(self.run_kvm_download(home, str(selected)), selected)
+            self.assertEqual(self.run_kvm_download(home, str(selected), explicit), explicit)
+
+    @unittest.skipUnless(shutil.which("pwsh"), "PowerShell is not installed")
+    def test_hyperv_cache_default_and_environment_expression(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory) / "home"
+            code = (
+                "$ast=$null; $tokens=$null; $errors=$null; "
+                "$ast=[System.Management.Automation.Language.Parser]::ParseFile($env:SCRIPT_PATH,[ref]$tokens,[ref]$errors); "
+                "$parameter=$ast.ParamBlock.Parameters | Where-Object { $_.Name.VariablePath.UserPath -eq 'Cache' }; "
+                "& ([scriptblock]::Create($parameter.DefaultValue.Extent.Text))"
+            )
+            environment = {**os.environ, "HOME": str(home), "SCRIPT_PATH": str(ROOT / "scripts/hyperv/hyperv.ps1")}
+            environment.pop("PI_VM_CACHE", None)
+            result = subprocess.run(["pwsh", "-NoProfile", "-Command", code], env=environment,
+                                    text=True, capture_output=True, check=True)
+            self.assertEqual(Path(result.stdout.strip()), home / ".cache/pi-vm/images")
+            selected = Path(directory) / "environment-cache"
+            environment["PI_VM_CACHE"] = str(selected)
+            result = subprocess.run(["pwsh", "-NoProfile", "-Command", code], env=environment,
+                                    text=True, capture_output=True, check=True)
+            self.assertEqual(Path(result.stdout.strip()), selected)
+
+    def test_make_download_passes_cache_environment_to_kvm_command(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            bindir = root / "bin"
+            bindir.mkdir()
+            record = root / "invocation"
+            fake_uv = bindir / "uv"
+            fake_uv.write_text("""#!/bin/sh
+printf '%s\\n' "$@" > "$RECORD"
+printf 'PI_VM_CACHE=%s\\n' "$PI_VM_CACHE" >> "$RECORD"
+""")
+            fake_uv.chmod(0o755)
+            environment = {**os.environ, "PATH": str(bindir) + os.pathsep + os.environ.get("PATH", ""),
+                           "HOME": str(root / "home"), "PI_VM_CACHE": str(root / "chosen-cache"),
+                           "RECORD": str(record)}
+            subprocess.run(["make", "--no-print-directory", "-C", str(ROOT), "download"],
+                           env=environment, text=True, capture_output=True, check=True)
+            lines = record.read_text().splitlines()
+            self.assertEqual(lines[:3], ["run", "--script", "scripts/kvm/kvm.py"])
+            self.assertEqual(lines[3], "download")
+            self.assertEqual(lines[4], f"PI_VM_CACHE={root / 'chosen-cache'}")
+
+
 class SeedTests(unittest.TestCase):
     def test_render_stages_everything_under_opt_pi_vm(self):
         with tempfile.TemporaryDirectory() as directory:

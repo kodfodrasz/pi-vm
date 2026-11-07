@@ -249,15 +249,40 @@ try {
     # A valid expanded cache and a restart do not require an extractor.
     New-Case
     $script:state.SevenZipCommandPath = $null
+    Remove-Item (Join-Path $cache 'Fedora-Cloud-Base-Azure-44-1.7.x86_64.vhdfixed.xz')
     $env:ProgramFiles = Join-Path $caseDir 'missing-program-files'
     ${env:ProgramFiles(x86)} = Join-Path $caseDir 'missing-program-files-x86'
     & $scriptPath @script:options
     Assert ($state.VM -and -not $state.ExtractorPath) 'Valid cache unexpectedly required 7z'
+    Assert (-not $state.Calls.Contains('download')) 'Valid expanded cache with missing archive attempted download'
+    Assert ($state.ExtractionPaths.Count -eq 0) 'Valid expanded cache with missing archive attempted extraction'
     $state.VM.State = 'Off'
     $state.Calls.Clear()
     & $scriptPath @script:options
     Assert ($state.Calls.Count -eq 1 -and $state.Calls[0] -eq 'start') 'Restart required 7z or rebuilt the VM'
     Assert ($env:PATH -eq $oldPath) 'Cached/restart path changed PATH'
+
+    # Environment cache selection is honored when -Cache is omitted; explicit
+    # -Cache still wins when both are supplied.
+    foreach ($selection in @('environment', 'explicit')) {
+        New-Case
+        $selected = Join-Path $caseDir "$selection-cache"
+        New-Item -ItemType Directory -Path $selected | Out-Null
+        Copy-Item (Join-Path $cache 'Fedora-Cloud-Base-Azure-44-1.7.x86_64.vhd') $selected
+        $env:PI_VM_CACHE = Join-Path $caseDir 'environment-cache'
+        if ($selection -eq 'environment') {
+            $script:options.Remove('Cache')
+            $script:state.Cache = $selected
+            $expected = $env:PI_VM_CACHE
+        } else {
+            $script:options.Cache = $selected
+            $script:state.Cache = $selected
+            $expected = $selected
+        }
+        & $scriptPath @script:options
+        Assert (Test-Path (Join-Path $expected '.download.lock')) "$selection cache selection was not used"
+        Remove-Item Env:PI_VM_CACHE -ErrorAction SilentlyContinue
+    }
 
     # Missing 7z fails during preflight, before download or VM creation.
     New-Case
